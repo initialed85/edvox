@@ -1,0 +1,9 @@
+models/*
+voices/*
+audio/*
+logs/*
+!.gitkeep
+.env
+.venv/
+__pycache__/
+*.py[cod]
