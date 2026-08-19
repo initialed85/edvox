@@ -68,7 +68,9 @@ Whisper is resident on `127.0.0.1:8178` and Chatterbox Nano is resident on
 `127.0.0.1:8190`. Their model weights are loaded once. `voice_loop.py` uses the
 resident Whisper HTTP service by default (`STT_BACKEND=server`) and the
 resident Chatterbox service when `TTS_BACKEND=chatterbox`; repeated turns should
-therefore no longer print model-loading messages.
+therefore no longer print model-loading messages. Processed Chatterbox voice
+references are also cached in the resident service, so the first turn with a
+reference prepares its speaker conditioning and later turns reuse it.
 
 Stop them with:
 
@@ -160,9 +162,10 @@ TTS_SPEAKER_FILE=/path/to/reference.wav  # optional cloning reference
 
 ### Chatterbox-Nano
 
-This uses the resident-independent Python/MPS Chatterbox runtime. It is
-currently loaded for each synthesis invocation, so it has a roughly five-second
-model-load cost. The model is already downloaded under
+This uses the resident Python/MPS Chatterbox runtime. The model is loaded once
+by `start-tts-background.sh` and remains resident for the service lifetime. A
+voice reference is processed on its first use and its speaker conditioning is
+cached for subsequent turns. The model is already downloaded under
 `models/chatterbox-nano`.
 
 ```bash
@@ -177,6 +180,7 @@ TTS_BACKEND=chatterbox
 CHATTERBOX_MODEL=nano
 CHATTERBOX_MODEL_DIR=models/chatterbox-nano
 CHATTERBOX_DEVICE=mps       # mps or cpu
+TTS_REFERENCE_CACHE_SIZE=4  # processed voice references retained by the service
 TTS_SPEAKER_FILE=/path/to/reference.mp3
 ```
 
