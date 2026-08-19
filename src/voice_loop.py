@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -34,6 +35,89 @@ def record(output: Path, seconds: float, device: str) -> None:
         "-f", "avfoundation", "-i", device, "-t", str(seconds),
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-y", str(output),
     ])
+
+
+def keyboard_listener() -> subprocess.Popen[str]:
+    listener = ROOT / "bin" / "voice-keyboard-events"
+    if not listener.is_file():
+        print("Building the macOS keyboard listener...", file=sys.stderr)
+        subprocess.run([str(ROOT / "scripts" / "build-keyboard-listener.sh")], check=True)
+    process = subprocess.Popen(
+        [str(listener)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    time.sleep(0.1)
+    if process.poll() is not None:
+        detail = process.stderr.read().strip() if process.stderr else ""
+        raise RuntimeError(detail or "keyboard listener exited unexpectedly")
+    return process
+
+
+def keyboard_event(process: subprocess.Popen[str]) -> str:
+    if process.stdout is None:
+        raise RuntimeError("keyboard listener has no output")
+    line = process.stdout.readline()
+    if not line:
+        detail = process.stderr.read().strip() if process.stderr else ""
+        raise RuntimeError(detail or "keyboard listener stopped")
+    event = line.strip()
+    if event not in {"down", "up"}:
+        return keyboard_event(process)
+    return event
+
+
+def stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.send_signal(signal.SIGINT)
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+def record_until_space(output: Path, mode: str, device: str) -> None:
+    """Capture audio until space is released (PTT) or pressed again (toggle)."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    listener = keyboard_listener()
+    recorder: subprocess.Popen[bytes] | None = None
+    try:
+        if mode == "push":
+            print("Hold SPACE to speak; release it to send.", file=sys.stderr)
+            while keyboard_event(listener) != "down":
+                pass
+        else:
+            print("Press SPACE to start speaking; press it again to send.", file=sys.stderr)
+            while keyboard_event(listener) != "down":
+                pass
+        print("Recording...", file=sys.stderr)
+        recorder = subprocess.Popen([
+            env("FFMPEG", "ffmpeg"), "-hide_banner", "-loglevel", "error",
+            "-f", "avfoundation", "-i", device,
+            "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-y", str(output),
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if mode == "push":
+            while keyboard_event(listener) != "up":
+                pass
+        else:
+            saw_release = False
+            while True:
+                event = keyboard_event(listener)
+                if event == "up":
+                    saw_release = True
+                elif event == "down" and saw_release:
+                    break
+        print("Recording stopped.", file=sys.stderr)
+    finally:
+        if recorder is not None:
+            stop_process(recorder)
+        stop_process(listener)
+    if not output.is_file() or output.stat().st_size < 1000:
+        raise RuntimeError("recording was too short or empty")
 
 
 def transcribe(audio: Path) -> str:
@@ -184,7 +268,10 @@ def execute_turn(
                 raise RuntimeError("text input was empty")
         else:
             if audio_path is None:
-                record(recorded, args.seconds, args.device)
+                if args.input_mode in {"push", "toggle"}:
+                    record_until_space(recorded, args.input_mode, args.device)
+                else:
+                    record(recorded, args.seconds, args.device)
                 audio_path = recorded
                 recorded_by_us = True
             elif not audio_path.is_file():
@@ -216,6 +303,15 @@ def main() -> int:
     parser.add_argument("--audio", help="Use an existing audio file instead of recording")
     parser.add_argument("--text", help="Use text instead of recording (chat/TTS smoke test)")
     parser.add_argument("--interactive", action="store_true", help="Keep taking turns until Ctrl-C/EOF")
+    parser.add_argument(
+        "--push-to-talk", "--ptt", dest="input_mode", action="store_const", const="push",
+        help="Hold the global SPACE key while speaking; release to send",
+    )
+    parser.add_argument(
+        "--toggle-to-talk", "--toggle", dest="input_mode", action="store_const", const="toggle",
+        help="Press global SPACE to start and press it again to send",
+    )
+    parser.set_defaults(input_mode=env("VOICE_INPUT_MODE", "fixed"))
     parser.add_argument("--system-prompt", help="System prompt for this process only")
     parser.add_argument("--system-prompt-file", help="Read the system prompt from a file for this process only")
     parser.add_argument(
@@ -230,6 +326,8 @@ def main() -> int:
         parser.error("--audio cannot be combined with --text or --interactive")
     if args.history_turns < 0:
         parser.error("--history-turns must be zero or greater")
+    if args.input_mode not in {"fixed", "push", "toggle"}:
+        parser.error("VOICE_INPUT_MODE must be fixed, push, or toggle")
 
     system_prompt = load_system_prompt(args)
     messages: list[dict[str, str]] = []
@@ -240,6 +338,8 @@ def main() -> int:
         print("Conversation history disabled.", file=sys.stderr)
     elif args.interactive:
         print(f"Conversation history: last {args.history_turns} turns (memory only).", file=sys.stderr)
+    if args.input_mode in {"push", "toggle"}:
+        print(f"Spacebar input mode: {args.input_mode}.", file=sys.stderr)
 
     if not args.interactive:
         if args.audio:

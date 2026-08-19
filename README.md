@@ -7,6 +7,49 @@ host. The components are deliberately replaceable:
 microphone -> Whisper STT -> llama-server chat -> TTS backend -> speakers
 ```
 
+## Spacebar input modes
+
+The normal fixed-duration microphone mode records `RECORD_SECONDS` seconds.
+For a more natural interface, the macOS keyboard listener supports global
+spacebar control:
+
+### Push-to-talk
+
+Hold Space while speaking and release it to submit:
+
+```bash
+TTS_BACKEND=chatterbox ./scripts/voice-turn.sh --interactive --push-to-talk
+```
+
+Short form:
+
+```bash
+./scripts/voice-turn.sh --interactive --ptt
+```
+
+### Toggle-to-talk
+
+Press Space to begin recording, then press Space again to submit:
+
+```bash
+TTS_BACKEND=chatterbox ./scripts/voice-turn.sh --interactive --toggle-to-talk
+```
+
+The listener uses a macOS global event tap, so the terminal does not need to
+have focus. The first run may require enabling Accessibility permission for
+the terminal or voice-chat process in **System Settings → Privacy & Security →
+Accessibility**. Build the listener manually with:
+
+```bash
+./scripts/build-keyboard-listener.sh
+```
+
+The existing fixed-duration mode remains available:
+
+```bash
+./scripts/voice-turn.sh --interactive
+```
+
 ## Resident inference services
 
 The chat server, Whisper, and Chatterbox can run as separate long-lived local
