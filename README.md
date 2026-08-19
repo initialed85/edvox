@@ -24,9 +24,28 @@ The chat model, STT model, and TTS model are intentionally separate processes/ba
 
 - Chat: existing llama-server at `http://192.168.137.111:8088/v1`
 - STT: whisper.cpp (`whisper-server`)
-- TTS: llama.cpp `llama-tts` with Qwen3-TTS, or a Chatterbox backend later
+- TTS: llama.cpp `llama-tts` with Qwen3-TTS 1.7B Base
 - Playback/capture: macOS `afplay`/CoreAudio; ffmpeg is available for conversion
 
-## Disk warning
+## Download speech models
 
-The Mac currently has only about 3 GiB free. Do not download multi-gigabyte model files until old files are cleaned up or more storage is available. The planned Qwen3-TTS 0.6B/Q8 + codec setup is roughly 1.3 GiB; a 1.7B setup is roughly 2.2 GiB before STT models and caches.
+```bash
+./scripts/download-whisper-base.en.sh
+./scripts/download-qwen-tts.sh
+```
+
+The Qwen3-TTS setup uses the llama.cpp-compatible 1.7B Base Q4 model plus its Q8 multimodal projector (about 1.4 GiB total). A reference recording can be supplied with `TTS_SPEAKER_FILE` for voice cloning.
+
+## Generate and play a test
+
+```bash
+./scripts/speak-qwen.sh "Hello from the local voice interface."
+afplay audio/test.wav
+```
+
+For a reference voice:
+
+```bash
+TTS_SPEAKER_FILE=/path/to/reference.mp3 \\
+  ./scripts/speak-qwen.sh "Hello in the reference voice."
+```
