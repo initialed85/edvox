@@ -12,31 +12,61 @@ Local voice interface for the llama.cpp chat server on `192.168.137.111:8088`.
 - `scripts/` — setup and service launch scripts
 - `logs/` — runtime logs
 
-## Planned pipeline
+## Pipeline components
 
 ```text
-microphone -> VAD/STT -> llama-server:8088 -> TTS -> speakers
+microphone -> Whisper STT -> llama-server:8088 -> Qwen3-TTS -> speakers
 ```
 
-The chat model, STT model, and TTS model are intentionally separate processes/backends so each can be replaced independently.
+The chat model, STT model, and TTS model are separate processes/backends so each can be replaced independently.
 
 ## Initial local components
 
 - Chat: existing llama-server at `http://192.168.137.111:8088/v1`
-- STT: whisper.cpp (`whisper-server`)
+- STT: whisper.cpp base English model
 - TTS: llama.cpp `llama-tts` with Qwen3-TTS 1.7B Base
-- Playback/capture: macOS `afplay`/CoreAudio; ffmpeg is available for conversion
+- Capture: ffmpeg + macOS AVFoundation (`:1` is the MacBook Pro Microphone)
+- Playback: macOS `afplay`
 
-## Download speech models
+## Speech-to-text
+
+Transcribe an existing audio file locally:
 
 ```bash
-./scripts/download-whisper-base.en.sh
-./scripts/download-qwen-tts.sh
+./scripts/transcribe.sh audio/qwen-smoke.wav
 ```
 
-The Qwen3-TTS setup uses the llama.cpp-compatible 1.7B Base Q4 model plus its Q8 multimodal projector (about 1.4 GiB total). A reference recording can be supplied with `TTS_SPEAKER_FILE` for voice cloning.
+Record five seconds from the built-in microphone and transcribe it:
 
-## Generate and play a test
+```bash
+./scripts/record-and-transcribe.sh
+```
+
+Change recording length or device:
+
+```bash
+RECORD_SECONDS=10 AUDIO_DEVICE=:1 ./scripts/record-and-transcribe.sh
+```
+
+List AVFoundation devices:
+
+```bash
+ffmpeg -f avfoundation -list_devices true -i ""
+```
+
+Start the optional Whisper HTTP service:
+
+```bash
+./scripts/start-whisper.sh
+```
+
+Then submit an audio file from another shell:
+
+```bash
+./scripts/transcribe-http.sh audio/qwen-smoke.wav
+```
+
+## Text-to-speech
 
 ```bash
 ./scripts/speak-qwen.sh "Hello from the local voice interface."
@@ -48,4 +78,11 @@ For a reference voice:
 ```bash
 TTS_SPEAKER_FILE=/path/to/reference.mp3 \\
   ./scripts/speak-qwen.sh "Hello in the reference voice."
+```
+
+## Download speech models
+
+```bash
+./scripts/download-whisper-base.en.sh
+./scripts/download-qwen-tts.sh
 ```
