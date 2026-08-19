@@ -7,6 +7,13 @@ pid_file=${CHAT_PID_FILE:-logs/llama-server.pid}
 log_file=${CHAT_LOG_FILE:-logs/llama-server.log}
 mkdir -p "$(dirname -- "$pid_file")" "$(dirname -- "$log_file")"
 
+# Do not start a second server if the configured endpoint is already healthy.
+# This also avoids reporting success for an old process after a bind failure.
+if curl -fsS --max-time 2 "http://${CHAT_HOST_CHECK:-127.0.0.1}:${CHAT_PORT:-8088}/health" >/dev/null 2>&1; then
+  echo "llama-server already healthy on port ${CHAT_PORT:-8088}; not managed by this invocation"
+  exit 0
+fi
+
 if [ -f "$pid_file" ]; then
   pid=$(cat "$pid_file")
   if kill -0 "$pid" 2>/dev/null; then
