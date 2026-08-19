@@ -8,3 +8,5 @@ logs/*
 __pycache__/
 *.py[cod]
 *.wav
+
+.venv-chatterbox/

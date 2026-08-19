@@ -1,121 +1,82 @@
 # voice-chat
 
-Local voice interface for the llama.cpp chat server on `192.168.137.111:8088`.
-
-## Current layout
-
-- `bin/` — local inference binaries (`llama-tts`, `whisper-server`, `whisper-cli`)
-- `models/` — speech models; keep large downloaded weights out of git
-- `voices/` — optional reference recordings for voice cloning
-- `audio/` — generated and captured audio
-- `src/` — orchestrator, HTTP adapters, audio I/O, and turn state machine
-- `scripts/` — setup and service launch scripts
-- `logs/` — runtime logs
+Local voice interface for the llama.cpp chat server on .
 
 ## Pipeline components
 
-```text
-microphone -> Whisper STT -> llama-server:8088 -> Qwen3-TTS -> speakers
-```
 
-The chat model, STT model, and TTS model are separate processes/backends so each can be replaced independently.
 
-## Initial local components
-
-- Chat: existing llama-server at `http://192.168.137.111:8088/v1`
-- STT: whisper.cpp base English model
-- TTS: llama.cpp `llama-tts` with Qwen3-TTS 1.7B Base
-- Capture: ffmpeg + macOS AVFoundation (`:1` is the MacBook Pro Microphone)
-- Playback: macOS `afplay`
+The chat, STT, and TTS backends are independent. The current TTS choices are
+Qwen3-TTS through llama.cpp and Chatterbox-Nano through its native PyTorch/MPS
+runtime.
 
 ## Speech-to-text
 
-Transcribe an existing audio file locally:
 
-```bash
-./scripts/transcribe.sh audio/qwen-smoke.wav
-```
+ Hello Edward, this is a local voice test.
+ you
 
-Record five seconds from the built-in microphone and transcribe it:
-
-```bash
-./scripts/record-and-transcribe.sh
-```
-
-Change recording length or device:
-
-```bash
-RECORD_SECONDS=10 AUDIO_DEVICE=:1 ./scripts/record-and-transcribe.sh
-```
-
-List AVFoundation devices:
-
-```bash
-ffmpeg -f avfoundation -list_devices true -i ""
-```
-
-Start the optional Whisper HTTP service:
-
-```bash
-./scripts/start-whisper.sh
-```
-
-Then submit an audio file from another shell:
-
-```bash
-./scripts/transcribe-http.sh audio/qwen-smoke.wav
-```
+The built-in MacBook Pro Microphone is AVFoundation device .
 
 ## Text-to-speech
 
-```bash
-./scripts/speak-qwen.sh "Hello from the local voice interface."
-afplay audio/test.wav
-```
+Qwen3-TTS:
 
-For a reference voice:
+audio/test.wav
 
-```bash
-TTS_SPEAKER_FILE=/path/to/reference.mp3 \\
-  ./scripts/speak-qwen.sh "Hello in the reference voice."
-```
+Chatterbox-Nano:
+
+
+
+Chatterbox supports native paralinguistic tags such as , ,
+and :
+
+
+
+Use a reference recording for voice cloning. Chatterbox requires a reference
+clip longer than five seconds:
+
+
+
+The Chatterbox runtime uses the dedicated Python 3.11 environment at
+, PyTorch 2.6, and MPS on the Apple Silicon host. The Nano
+model is stored in  and is approximately 2.8 GiB.
 
 ## One-shot voice turn
 
-The complete local loop records a microphone turn, transcribes it with Whisper,
-sends the text to the existing OpenAI-compatible llama-server, synthesizes the
-answer with Qwen3-TTS, and plays the WAV response:
+The complete loop records, transcribes, chats, synthesizes, and plays:
 
-```bash
-./scripts/voice-turn.sh
-```
+You: you
+Assistant: Hello! How can I help you today? 😊
+Audio: /Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224225.wav
 
-Use a shorter recording or skip playback while testing:
+Use Chatterbox-Nano for the TTS response:
 
-```bash
-RECORD_SECONDS=3 ./scripts/voice-turn.sh --no-play
-```
+loaded PerthNet (Implicit) at step 250,000
+S3 Token -> Mel Inference...
+/Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224238.wav
+You: you
+Assistant: Hi! How can I help you today?
+Audio: /Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224238.wav
 
-A text-only smoke test avoids the microphone and exercises chat plus TTS:
+A text-only smoke test avoids the microphone:
 
-```bash
-./scripts/voice-turn.sh --text "Say hello in one short sentence." --no-play
-```
+loaded PerthNet (Implicit) at step 250,000
+S3 Token -> Mel Inference...
+/Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224301.wav
+You: Say hello in one short sentence.
+Assistant: Hello!
+Audio: /Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224301.wav
 
-An existing audio file can be sent through STT, chat, and TTS:
+An existing audio file can exercise the complete STT -> chat -> TTS path:
 
-```bash
-./scripts/voice-turn.sh --audio audio/qwen-smoke.wav --no-play
-```
+loaded PerthNet (Implicit) at step 250,000
+You: Hello Edward, this is a local voice test.
+Assistant: Hello! This is Edward, your AI assistant. How can I help you today? Whether you have questions, need assistance with a task, or just want to chat, I'm here for you.
 
-Keep the recorded microphone turn for inspection with `--keep-audio`. Set
-`TTS_SPEAKER_FILE` to a WAV or MP3 reference recording to enable voice cloning.
-Configuration can be supplied through environment variables or copied from
-`.env.example`.
+Set  to a WAV or MP3 reference recording to enable cloning.
+Use  to retain a newly recorded microphone turn.
 
-## Download speech models
+## Setup/download scripts
 
-```bash
-./scripts/download-whisper-base.en.sh
-./scripts/download-qwen-tts.sh
-```
+

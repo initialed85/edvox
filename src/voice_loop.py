@@ -42,8 +42,6 @@ def transcribe(audio: Path) -> str:
         "-m", env("STT_MODEL", str(ROOT / "models" / "ggml-base.en.bin")),
         "-l", env("STT_LANG", "en"), "-nt", "-np", str(audio),
     ], capture=True)
-    # whisper-cli writes diagnostics to stdout with some builds; retain only the
-    # recognized text line(s), while allowing punctuation and multiline replies.
     ignored_prefixes = (
         "load_", "ggml_", "whisper_", "system_info:", "main:",
         "read_audio_data:", "operator():", "model size", "model params",
@@ -67,8 +65,6 @@ def chat(text: str) -> str:
         "temperature": float(env("CHAT_TEMPERATURE", "0.7")),
         "max_tokens": int(env("CHAT_MAX_TOKENS", "256")),
         "stream": False,
-        # The local Qwen chat server supports this and it avoids sending hidden
-        # reasoning to the TTS model.
         "chat_template_kwargs": {"enable_thinking": False},
     }
     request = urllib.request.Request(
@@ -92,7 +88,7 @@ def chat(text: str) -> str:
     return answer
 
 
-def speak(text: str, output: Path) -> None:
+def speak_qwen(text: str, output: Path) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     command = [
         str(ROOT / "bin" / "llama-tts"),
@@ -104,8 +100,31 @@ def speak(text: str, output: Path) -> None:
     speaker = env("TTS_SPEAKER_FILE", "")
     if speaker:
         command += ["--tts-speaker-file", speaker]
-    print("Synthesizing response...", file=sys.stderr)
+    print("Synthesizing response with Qwen3-TTS...", file=sys.stderr)
     run(command)
+
+
+def speak_chatterbox(text: str, output: Path) -> None:
+    command = [
+        str(ROOT / ".venv-chatterbox" / "bin" / "python"),
+        str(ROOT / "src" / "chatterbox_tts.py"),
+        text, "--output", str(output),
+        "--device", env("CHATTERBOX_DEVICE", "mps"),
+        "--model", env("CHATTERBOX_MODEL", "nano"),
+        "--model-dir", env("CHATTERBOX_MODEL_DIR", str(ROOT / "models" / "chatterbox-nano")),
+    ]
+    speaker = env("TTS_SPEAKER_FILE", "")
+    if speaker:
+        command += ["--reference", speaker]
+    print(f"Synthesizing response with Chatterbox {env('CHATTERBOX_MODEL', 'nano').title()}...", file=sys.stderr)
+    run(command)
+
+
+def speak(text: str, output: Path) -> None:
+    if env("TTS_BACKEND", "qwen").lower() in {"chatterbox", "chatterbox-nano", "nano", "turbo"}:
+        speak_chatterbox(text, output)
+    else:
+        speak_qwen(text, output)
 
 
 def main() -> int:
