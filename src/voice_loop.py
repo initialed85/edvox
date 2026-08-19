@@ -37,22 +37,27 @@ def record(output: Path, seconds: float, device: str) -> None:
 
 
 def transcribe(audio: Path) -> str:
-    output = run([
-        str(ROOT / "bin" / "whisper-cli"),
-        "-m", env("STT_MODEL", str(ROOT / "models" / "ggml-base.en.bin")),
-        "-l", env("STT_LANG", "en"), "-nt", "-np", str(audio),
-    ], capture=True)
-    ignored_prefixes = (
-        "load_", "ggml_", "whisper_", "system_info:", "main:",
-        "read_audio_data:", "operator():", "model size", "model params",
-        "memory size", "total time", "timings:", "output",
-    )
-    lines = []
-    for line in output.splitlines():
-        line = line.strip()
-        if line and not line.startswith(ignored_prefixes):
-            lines.append(line)
-    text = " ".join(lines).strip()
+    if env("STT_BACKEND", "server").lower() in {"server", "http", "whisper-server"}:
+        command = [sys.executable, str(ROOT / "src" / "whisper_client.py"), str(audio)]
+    else:
+        command = [
+            str(ROOT / "bin" / "whisper-cli"),
+            "-m", env("STT_MODEL", str(ROOT / "models" / "ggml-base.en.bin")),
+            "-l", env("STT_LANG", "en"), "-nt", "-np", str(audio),
+        ]
+    output = run(command, capture=True)
+    if env("STT_BACKEND", "server").lower() in {"server", "http", "whisper-server"}:
+        text = output.strip()
+    else:
+        ignored_prefixes = (
+            "load_", "ggml_", "whisper_", "system_info:", "main:",
+            "read_audio_data:", "operator():", "model size", "model params",
+            "memory size", "total time", "timings:", "output",
+        )
+        text = " ".join(
+            line.strip() for line in output.splitlines()
+            if line.strip() and not line.strip().startswith(ignored_prefixes)
+        ).strip()
     if not text:
         raise RuntimeError("speech recognition returned no text")
     return text
@@ -128,22 +133,20 @@ def speak_qwen(text: str, output: Path) -> None:
 
 
 def speak_chatterbox(text: str, output: Path) -> None:
-    command = [
-        str(ROOT / ".venv-chatterbox" / "bin" / "python"),
-        str(ROOT / "src" / "chatterbox_tts.py"),
-        text, "--output", str(output),
-        "--device", env("CHATTERBOX_DEVICE", "mps"),
-        "--model", env("CHATTERBOX_MODEL", "nano"),
-        "--model-dir", env(
-            "CHATTERBOX_MODEL_DIR",
-            str(ROOT / "models" / f"chatterbox-{env('CHATTERBOX_MODEL', 'nano')}"),
-        ),
-    ]
     speaker = env("TTS_SPEAKER_FILE", "")
-    if speaker:
-        command += ["--reference", speaker]
-    print(f"Synthesizing response with Chatterbox {env('CHATTERBOX_MODEL', 'nano').title()}...", file=sys.stderr)
-    run(command)
+    url = env("TTS_URL", "http://127.0.0.1:8190").rstrip("/") + "/synthesize"
+    body = json.dumps({"text": text, "output": str(output), "reference": speaker}).encode()
+    request = urllib.request.Request(
+        url, data=body, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    print("Synthesizing response with resident Chatterbox...", file=sys.stderr)
+    try:
+        with urllib.request.urlopen(request, timeout=float(env("TTS_TIMEOUT", "300"))) as response:
+            payload = json.load(response)
+    except urllib.error.HTTPError as error:
+        raise RuntimeError(f"TTS server returned HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+    if not payload.get("output"):
+        raise RuntimeError(f"TTS server returned an invalid response: {payload!r}")
 
 
 def speak(text: str, output: Path) -> None:

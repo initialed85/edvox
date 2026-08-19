@@ -7,6 +7,38 @@ host. The components are deliberately replaceable:
 microphone -> Whisper STT -> llama-server chat -> TTS backend -> speakers
 ```
 
+## Resident inference services
+
+The chat server, Whisper, and Chatterbox can run as separate long-lived local
+processes. Start them once before an interactive voice session:
+
+```bash
+./scripts/start-chat-background.sh
+./scripts/start-whisper-background.sh
+TTS_BACKEND=chatterbox ./scripts/start-tts-background.sh
+
+./scripts/status-chat.sh
+./scripts/status-tts.sh
+```
+
+Whisper is resident on `127.0.0.1:8178` and Chatterbox Nano is resident on
+`127.0.0.1:8190`. Their model weights are loaded once. `voice_loop.py` uses the
+resident Whisper HTTP service by default (`STT_BACKEND=server`) and the
+resident Chatterbox service when `TTS_BACKEND=chatterbox`; repeated turns should
+therefore no longer print model-loading messages.
+
+Stop them with:
+
+```bash
+./scripts/stop-tts.sh
+./scripts/stop-whisper.sh
+./scripts/stop-chat.sh
+```
+
+The old one-shot paths remain available for diagnostics: use
+`STT_BACKEND=cli` for `whisper-cli`, and invoke `src/chatterbox_tts.py` directly
+for a one-shot Chatterbox generation.
+
 ## Chat server
 
 The chat model is kept resident by `llama-server`; the voice loop only sends
