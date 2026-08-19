@@ -16,7 +16,7 @@ ctx_size=${CHAT_CTX_SIZE:-32768}
 spec_type=${CHAT_SPEC_TYPE:-draft-mtp}
 
 set -- "$server" \
-  --host "${CHAT_HOST:-0.0.0.0}" \
+  --host "${CHAT_HOST:-127.0.0.1}" \
   --port "${CHAT_PORT:-8088}" \
   --temp "${CHAT_TEMPERATURE:-0.6}" \
   --top-p "${CHAT_TOP_P:-0.95}" \

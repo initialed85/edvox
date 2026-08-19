@@ -146,6 +146,9 @@ def speak_chatterbox(text: str, output: Path) -> None:
 def speak(text: str, output: Path) -> None:
     backend = env("TTS_BACKEND", "qwen").lower()
     if backend in {"chatterbox", "chatterbox-nano", "nano", "turbo"}:
+        model = env("CHATTERBOX_MODEL", "turbo" if backend == "turbo" else "nano")
+        # Keep the backend alias useful without mutating the caller's environment.
+        os.environ["CHATTERBOX_MODEL"] = model
         speak_chatterbox(text, output)
     elif backend in {"qwen", "qwen3", "qwen3-tts"}:
         speak_qwen(text, output)
