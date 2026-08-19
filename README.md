@@ -80,30 +80,42 @@ TTS_SPEAKER_FILE=/path/to/reference.mp3 \\
   ./scripts/speak-qwen.sh "Hello in the reference voice."
 ```
 
-## Download speech models
-
-```bash
-./scripts/download-whisper-base.en.sh
-./scripts/download-qwen-tts.sh
-```
-
 ## One-shot voice turn
 
 The complete local loop records a microphone turn, transcribes it with Whisper,
 sends the text to the existing OpenAI-compatible llama-server, synthesizes the
 answer with Qwen3-TTS, and plays the WAV response:
 
-
+```bash
+./scripts/voice-turn.sh
+```
 
 Use a shorter recording or skip playback while testing:
 
-
+```bash
+RECORD_SECONDS=3 ./scripts/voice-turn.sh --no-play
+```
 
 A text-only smoke test avoids the microphone and exercises chat plus TTS:
 
+```bash
+./scripts/voice-turn.sh --text "Say hello in one short sentence." --no-play
+```
 
+An existing audio file can be sent through STT, chat, and TTS:
 
-Keep the recorded microphone turn for inspection with . Set
- to a WAV or MP3 reference recording to enable voice cloning.
+```bash
+./scripts/voice-turn.sh --audio audio/qwen-smoke.wav --no-play
+```
+
+Keep the recorded microphone turn for inspection with `--keep-audio`. Set
+`TTS_SPEAKER_FILE` to a WAV or MP3 reference recording to enable voice cloning.
 Configuration can be supplied through environment variables or copied from
-.
+`.env.example`.
+
+## Download speech models
+
+```bash
+./scripts/download-whisper-base.en.sh
+./scripts/download-qwen-tts.sh
+```

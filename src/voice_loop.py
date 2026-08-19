@@ -7,7 +7,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -45,28 +44,31 @@ def transcribe(audio: Path) -> str:
     ], capture=True)
     # whisper-cli writes diagnostics to stdout with some builds; retain only the
     # recognized text line(s), while allowing punctuation and multiline replies.
+    ignored_prefixes = (
+        "load_", "ggml_", "whisper_", "system_info:", "main:",
+        "read_audio_data:", "operator():", "model size", "model params",
+        "memory size", "total time", "timings:", "output",
+    )
     lines = []
     for line in output.splitlines():
         line = line.strip()
-        if not line or line.startswith(("load_", "ggml_", "whisper_", "system_info:", "main:", "read_audio_data:", "operator():")):
-            continue
-        if line.startswith(("model size", "model params", "memory size", "total time", "timings:", "output")):
-            continue
-        lines.append(line)
+        if line and not line.startswith(ignored_prefixes):
+            lines.append(line)
     text = " ".join(lines).strip()
     if not text:
         raise RuntimeError("speech recognition returned no text")
     return text
 
 
-def chat(text: str, history: list[dict[str, str]]) -> str:
-    messages = history + [{"role": "user", "content": text}]
+def chat(text: str) -> str:
     body = {
         "model": env("CHAT_MODEL", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL"),
-        "messages": messages,
+        "messages": [{"role": "user", "content": text}],
         "temperature": float(env("CHAT_TEMPERATURE", "0.7")),
         "max_tokens": int(env("CHAT_MAX_TOKENS", "256")),
         "stream": False,
+        # The local Qwen chat server supports this and it avoids sending hidden
+        # reasoning to the TTS model.
         "chat_template_kwargs": {"enable_thinking": False},
     }
     request = urllib.request.Request(
@@ -110,33 +112,42 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, default=float(env("RECORD_SECONDS", "5")))
     parser.add_argument("--device", default=env("AUDIO_DEVICE", ":1"))
+    parser.add_argument("--audio", help="Use an existing audio file instead of recording")
+    parser.add_argument("--text", help="Use text instead of recording (chat/TTS smoke test)")
     parser.add_argument("--no-play", action="store_true")
-    parser.add_argument("--text", help="Use this text instead of recording (useful for testing)")
     parser.add_argument("--keep-audio", action="store_true")
     args = parser.parse_args()
+    if args.audio and args.text:
+        parser.error("--audio and --text cannot be used together")
 
     audio_dir = ROOT / "audio"
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     recorded = audio_dir / f"turn-{timestamp}.wav"
     response_audio = audio_dir / f"response-{timestamp}.wav"
-    history: list[dict[str, str]] = []
+    recorded_by_us = False
 
     try:
         if args.text:
             user_text = args.text
         else:
-            record(recorded, args.seconds, args.device)
+            if args.audio:
+                recorded = Path(args.audio).expanduser().resolve()
+                if not recorded.is_file():
+                    raise FileNotFoundError(f"audio file not found: {recorded}")
+            else:
+                record(recorded, args.seconds, args.device)
+                recorded_by_us = True
             print("Transcribing...", file=sys.stderr)
             user_text = transcribe(recorded)
         print(f"You: {user_text}")
-        answer = chat(user_text, history)
+        answer = chat(user_text)
         print(f"Assistant: {answer}")
         speak(answer, response_audio)
         if not args.no_play:
             run([env("AFPLAY", "afplay"), str(response_audio)])
         print(f"Audio: {response_audio}")
     finally:
-        if not args.keep_audio and recorded.exists() and not args.text:
+        if recorded_by_us and not args.keep_audio and recorded.exists():
             recorded.unlink()
     return 0
 
