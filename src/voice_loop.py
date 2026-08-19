@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-shot local voice turn: record -> transcribe -> chat -> speak -> play."""
+"""Local voice turns with optional in-memory conversation history."""
 from __future__ import annotations
 
 import argparse
@@ -58,17 +58,18 @@ def transcribe(audio: Path) -> str:
     return text
 
 
-def chat(text: str) -> str:
+def chat(text: str, messages: list[dict[str, str]]) -> str:
+    request_messages = [*messages, {"role": "user", "content": text}]
     body = {
         "model": env("CHAT_MODEL", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL"),
-        "messages": [{"role": "user", "content": text}],
+        "messages": request_messages,
         "temperature": float(env("CHAT_TEMPERATURE", "0.7")),
         "max_tokens": int(env("CHAT_MAX_TOKENS", "256")),
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
     }
     request = urllib.request.Request(
-        env("CHAT_BASE_URL", "http://192.168.137.111:8088/v1").rstrip("/") + "/chat/completions",
+        env("CHAT_BASE_URL", "http://127.0.0.1:8088/v1").rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
@@ -86,6 +87,28 @@ def chat(text: str) -> str:
     if not answer:
         raise RuntimeError("chat server returned an empty answer")
     return answer
+
+
+def trim_messages(messages: list[dict[str, str]], turns: int) -> list[dict[str, str]]:
+    """Keep the system message and at most ``turns`` user/assistant pairs."""
+    system = next((message for message in messages if message["role"] == "system"), None)
+    dialogue = [message for message in messages if message["role"] != "system"]
+    dialogue = dialogue[-(turns * 2):] if turns else []
+    return ([system] if system else []) + dialogue
+
+
+def load_system_prompt(args: argparse.Namespace) -> str:
+    if args.system_prompt is not None and args.system_prompt_file:
+        raise ValueError("--system-prompt and --system-prompt-file cannot be used together")
+    prompt_file = args.system_prompt_file or env("CHAT_SYSTEM_PROMPT_FILE", "")
+    if prompt_file:
+        path = Path(prompt_file).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"system prompt file not found: {path}")
+        return path.read_text(encoding="utf-8").strip()
+    if args.system_prompt is not None:
+        return args.system_prompt.strip()
+    return env("CHAT_SYSTEM_PROMPT", "").strip()
 
 
 def speak_qwen(text: str, output: Path) -> None:
@@ -121,45 +144,52 @@ def speak_chatterbox(text: str, output: Path) -> None:
 
 
 def speak(text: str, output: Path) -> None:
-    if env("TTS_BACKEND", "qwen").lower() in {"chatterbox", "chatterbox-nano", "nano", "turbo"}:
+    backend = env("TTS_BACKEND", "qwen").lower()
+    if backend in {"chatterbox", "chatterbox-nano", "nano", "turbo"}:
         speak_chatterbox(text, output)
-    else:
+    elif backend in {"qwen", "qwen3", "qwen3-tts"}:
         speak_qwen(text, output)
+    else:
+        raise ValueError(f"unsupported TTS_BACKEND: {backend}")
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--seconds", type=float, default=float(env("RECORD_SECONDS", "5")))
-    parser.add_argument("--device", default=env("AUDIO_DEVICE", ":1"))
-    parser.add_argument("--audio", help="Use an existing audio file instead of recording")
-    parser.add_argument("--text", help="Use text instead of recording (chat/TTS smoke test)")
-    parser.add_argument("--no-play", action="store_true")
-    parser.add_argument("--keep-audio", action="store_true")
-    args = parser.parse_args()
-    if args.audio and args.text:
-        parser.error("--audio and --text cannot be used together")
+def response_paths(turn_number: int) -> tuple[Path, Path]:
+    stamp = f"{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1_000_000:06d}-t{turn_number}"
+    return ROOT / "audio" / f"turn-{stamp}.wav", ROOT / "audio" / f"response-{stamp}.wav"
 
-    audio_dir = ROOT / "audio"
-    timestamp = time.strftime("%Y%m%d-%H%M%S")
-    recorded = audio_dir / f"turn-{timestamp}.wav"
-    response_audio = audio_dir / f"response-{timestamp}.wav"
+
+def execute_turn(
+    args: argparse.Namespace,
+    messages: list[dict[str, str]],
+    turn_number: int,
+    *,
+    forced_text: str | None = None,
+    audio_path: Path | None = None,
+) -> None:
+    recorded, response_audio = response_paths(turn_number)
     recorded_by_us = False
-
     try:
-        if args.text:
-            user_text = args.text
+        if forced_text is not None:
+            user_text = forced_text.strip()
+            if not user_text:
+                raise RuntimeError("text input was empty")
         else:
-            if args.audio:
-                recorded = Path(args.audio).expanduser().resolve()
-                if not recorded.is_file():
-                    raise FileNotFoundError(f"audio file not found: {recorded}")
-            else:
+            if audio_path is None:
                 record(recorded, args.seconds, args.device)
+                audio_path = recorded
                 recorded_by_us = True
+            elif not audio_path.is_file():
+                raise FileNotFoundError(f"audio file not found: {audio_path}")
             print("Transcribing...", file=sys.stderr)
-            user_text = transcribe(recorded)
+            user_text = transcribe(audio_path)
         print(f"You: {user_text}")
-        answer = chat(user_text)
+
+        answer = chat(user_text, messages)
+        messages.extend([
+            {"role": "user", "content": user_text},
+            {"role": "assistant", "content": answer},
+        ])
+        messages[:] = trim_messages(messages, args.history_turns)
         print(f"Assistant: {answer}")
         speak(answer, response_audio)
         if not args.no_play:
@@ -168,6 +198,69 @@ def main() -> int:
     finally:
         if recorded_by_us and not args.keep_audio and recorded.exists():
             recorded.unlink()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--seconds", type=float, default=float(env("RECORD_SECONDS", "5")))
+    parser.add_argument("--device", default=env("AUDIO_DEVICE", ":1"))
+    parser.add_argument("--audio", help="Use an existing audio file instead of recording")
+    parser.add_argument("--text", help="Use text instead of recording (chat/TTS smoke test)")
+    parser.add_argument("--interactive", action="store_true", help="Keep taking turns until Ctrl-C/EOF")
+    parser.add_argument("--system-prompt", help="System prompt for this process only")
+    parser.add_argument("--system-prompt-file", help="Read the system prompt from a file for this process only")
+    parser.add_argument(
+        "--history-turns", type=int,
+        default=int(env("CHAT_HISTORY_TURNS", "8")),
+        help="Previous user/assistant turns to retain in memory (default: 8)",
+    )
+    parser.add_argument("--no-play", action="store_true")
+    parser.add_argument("--keep-audio", action="store_true")
+    args = parser.parse_args()
+    if args.audio and (args.text is not None or args.interactive):
+        parser.error("--audio cannot be combined with --text or --interactive")
+    if args.history_turns < 0:
+        parser.error("--history-turns must be zero or greater")
+
+    system_prompt = load_system_prompt(args)
+    messages: list[dict[str, str]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+        print("Using a process-local system prompt.", file=sys.stderr)
+    if args.history_turns == 0:
+        print("Conversation history disabled.", file=sys.stderr)
+    elif args.interactive:
+        print(f"Conversation history: last {args.history_turns} turns (memory only).", file=sys.stderr)
+
+    if not args.interactive:
+        if args.audio:
+            execute_turn(
+                args, messages, 1,
+                audio_path=Path(args.audio).expanduser().resolve(),
+            )
+        else:
+            execute_turn(args, messages, 1, forced_text=args.text)
+        return 0
+
+    turn_number = 1
+    pending_text = args.text
+    try:
+        while True:
+            if args.text is not None or (not sys.stdin.isatty() and pending_text is None):
+                if pending_text is not None:
+                    forced_text = pending_text
+                    pending_text = None
+                else:
+                    try:
+                        forced_text = input("You (text): ")
+                    except EOFError:
+                        break
+            else:
+                forced_text = None
+            execute_turn(args, messages, turn_number, forced_text=forced_text)
+            turn_number += 1
+    except KeyboardInterrupt:
+        print("\nVoice session ended.", file=sys.stderr)
     return 0
 
 

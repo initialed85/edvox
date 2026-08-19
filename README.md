@@ -1,82 +1,205 @@
 # voice-chat
 
-Local voice interface for the llama.cpp chat server on .
+A local voice interface for the llama.cpp chat server on the Apple Silicon
+host. The components are deliberately replaceable:
 
-## Pipeline components
+```text
+microphone -> Whisper STT -> llama-server chat -> TTS backend -> speakers
+```
 
+## Chat server
 
+The chat model is kept resident by `llama-server`; the voice loop only sends
+HTTP requests to it. The managed launcher uses a practical 32K context instead
+of the model's 262K maximum, keeps one slot, enables prompt caching, disables
+model reasoning by default, and retains the existing MTP speculative decoder.
+This is enough room for the in-memory conversation history while avoiding an
+unnecessarily large KV-cache reservation.
 
-The chat, STT, and TTS backends are independent. The current TTS choices are
-Qwen3-TTS through llama.cpp and Chatterbox-Nano through its native PyTorch/MPS
-runtime.
+Start it in the background:
 
-## Speech-to-text
+```bash
+./scripts/start-chat-background.sh
+./scripts/status-chat.sh
+```
 
+Stop only a server started by the background launcher:
 
- Hello Edward, this is a local voice test.
- you
+```bash
+./scripts/stop-chat.sh
+```
 
-The built-in MacBook Pro Microphone is AVFoundation device .
+The launcher defaults to localhost for safety. Set `CHAT_HOST=0.0.0.0` if the
+server must be reachable from another machine. The first launch can take time
+to map the model; later launches reuse the local Hugging Face cache.
 
-## Text-to-speech
+Useful server tuning variables:
 
-Qwen3-TTS:
+```bash
+CHAT_CTX_SIZE=32768       # use 65536 if longer conversations need it
+CHAT_PARALLEL=1           # one interactive voice conversation
+CHAT_SPEC_TYPE=draft-mtp
+CHAT_SPEC_DRAFT_N_MAX=2
+CHAT_REASONING=off
+CHAT_CACHE_TYPE_K=q8_0
+CHAT_CACHE_TYPE_V=q8_0
+```
 
-audio/test.wav
+To use another chat model, stop the managed server and start it with a new
+Hugging Face selector:
 
-Chatterbox-Nano:
+```bash
+CHAT_HF_REPO='owner/model:Q4_K_M' ./scripts/start-chat-background.sh
+```
 
+Or point directly at a local GGUF:
 
+```bash
+CHAT_MODEL_PATH="$HOME/path/to/model.gguf" ./scripts/start-chat-background.sh
+```
 
-Chatterbox supports native paralinguistic tags such as , ,
-and :
+`CHAT_MODEL` in the voice-loop environment is the model name sent in the API
+request; it is not what loads the weights. The loaded weights are selected by
+`CHAT_HF_REPO` or `CHAT_MODEL_PATH` when the server starts.
 
+## TTS options
 
+### Qwen3-TTS through llama.cpp
 
-Use a reference recording for voice cloning. Chatterbox requires a reference
-clip longer than five seconds:
+This is the default and has the lowest tested generation latency:
 
+```bash
+TTS_BACKEND=qwen ./scripts/voice-turn.sh --text "Hello from Qwen."
+```
 
+Relevant variables:
 
-The Chatterbox runtime uses the dedicated Python 3.11 environment at
-, PyTorch 2.6, and MPS on the Apple Silicon host. The Nano
-model is stored in  and is approximately 2.8 GiB.
+```bash
+TTS_BACKEND=qwen
+TTS_MODEL=models/Qwen3-TTS-12Hz-1.7B-Base-Q4_K_M.gguf
+TTS_MMPROJ=models/mmproj-Qwen3-TTS-12Hz-1.7B-Base-Q8_0.gguf
+TTS_LANG=en
+TTS_FRAMES=512
+TTS_SPEAKER_FILE=/path/to/reference.wav  # optional cloning reference
+```
 
-## One-shot voice turn
+### Chatterbox-Nano
 
-The complete loop records, transcribes, chats, synthesizes, and plays:
+This uses the resident-independent Python/MPS Chatterbox runtime. It is
+currently loaded for each synthesis invocation, so it has a roughly five-second
+model-load cost. The model is already downloaded under
+`models/chatterbox-nano`.
 
-You: you
-Assistant: Hello! How can I help you today? 😊
-Audio: /Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224225.wav
+```bash
+TTS_BACKEND=chatterbox \
+  ./scripts/voice-turn.sh --text "Hello from Chatterbox Nano."
+```
 
-Use Chatterbox-Nano for the TTS response:
+Relevant variables:
 
-loaded PerthNet (Implicit) at step 250,000
-S3 Token -> Mel Inference...
-/Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224238.wav
-You: you
-Assistant: Hi! How can I help you today?
-Audio: /Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224238.wav
+```bash
+TTS_BACKEND=chatterbox
+CHATTERBOX_MODEL=nano
+CHATTERBOX_MODEL_DIR=models/chatterbox-nano
+CHATTERBOX_DEVICE=mps       # mps or cpu
+TTS_SPEAKER_FILE=/path/to/reference.mp3
+```
 
-A text-only smoke test avoids the microphone:
+A reference clip longer than five seconds enables voice cloning. The tested
+reference is:
 
-loaded PerthNet (Implicit) at step 250,000
-S3 Token -> Mel Inference...
-/Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224301.wav
-You: Say hello in one short sentence.
-Assistant: Hello!
-Audio: /Users/edwardbeech/Projects/Home/voice-chat/audio/response-20260819-224301.wav
+```bash
+TTS_SPEAKER_FILE="$HOME/Projects/Home/Orpheus-FastAPI/docs/TaraSad.mp3" \
+  ./scripts/speak-chatterbox.sh "Hello in the reference voice."
+```
 
-An existing audio file can exercise the complete STT -> chat -> TTS path:
+`CHATTERBOX_MODEL=turbo` is supported by the wrapper, but its model files must
+be downloaded separately and `CHATTERBOX_MODEL_DIR` must point at them. Nano is
+currently the installed Chatterbox model.
 
-loaded PerthNet (Implicit) at step 250,000
-You: Hello Edward, this is a local voice test.
-Assistant: Hello! This is Edward, your AI assistant. How can I help you today? Whether you have questions, need assistance with a task, or just want to chat, I'm here for you.
+Direct TTS commands:
 
-Set  to a WAV or MP3 reference recording to enable cloning.
-Use  to retain a newly recorded microphone turn.
+```bash
+./scripts/speak-qwen.sh "Hello from Qwen3-TTS."
+./scripts/speak-chatterbox.sh "Hello from Chatterbox Nano."
+afplay audio/chatterbox-nano.wav
+```
 
-## Setup/download scripts
+## STT and audio variables
 
+```bash
+STT_MODEL=models/ggml-base.en.bin
+STT_LANG=en
+AUDIO_DEVICE=:1          # MacBook Pro Microphone in AVFoundation
+RECORD_SECONDS=5
+AFPLAY=afplay
+```
 
+The current STT implementation invokes `whisper-cli` directly. The existing
+Whisper HTTP server remains available for separate integrations.
+
+## System prompt and current-session history
+
+The voice loop accepts a system prompt. It is process-local and is not saved
+by this repository:
+
+```bash
+CHAT_SYSTEM_PROMPT='You are a mischievous but useful voice assistant. Be concise.' \
+  TTS_BACKEND=chatterbox ./scripts/voice-turn.sh --interactive
+```
+
+For a longer prompt, use a file:
+
+```bash
+CHAT_SYSTEM_PROMPT_FILE="$HOME/.config/voice-chat/system-prompt.txt" \
+  ./scripts/voice-turn.sh --interactive
+```
+
+The interactive mode keeps conversational history in Python memory only and
+sends it with each chat completion request:
+
+```bash
+./scripts/voice-turn.sh --interactive
+```
+
+By default it retains the last eight user/assistant turns. Change or disable
+that behaviour with:
+
+```bash
+CHAT_HISTORY_TURNS=20 ./scripts/voice-turn.sh --interactive
+CHAT_HISTORY_TURNS=0  ./scripts/voice-turn.sh --interactive
+```
+
+A text-driven session is useful for testing without the microphone:
+
+```bash
+./scripts/voice-turn.sh --interactive --text "Remember that my favourite colour is orange." --no-play
+```
+
+The first `--text` value is processed immediately; subsequent prompts are read
+from the terminal. Exiting the process discards the system prompt and history.
+A normal one-shot invocation (`--text`, `--audio`, or one microphone turn) also
+has no persistent history.
+
+## One-shot examples
+
+```bash
+# Record, transcribe, chat, synthesize, and play.
+./scripts/voice-turn.sh
+
+# Use an existing recording and do not play the response.
+TTS_BACKEND=chatterbox ./scripts/voice-turn.sh \
+  --audio audio/qwen-smoke.wav --no-play
+
+# Keep a newly recorded input file for inspection.
+./scripts/voice-turn.sh --keep-audio --no-play
+```
+
+## Downloads and checks
+
+```bash
+./scripts/download-whisper-base.en.sh
+./scripts/download-qwen-tts.sh
+./scripts/download-chatterbox-nano.sh
+./scripts/check-host.sh
+```
