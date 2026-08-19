@@ -6,7 +6,7 @@ cd "$ROOT"
 text=${*:-Hello from Chatterbox Nano.}
 out=${OUTPUT:-audio/chatterbox-nano.wav}
 model=${CHATTERBOX_MODEL:-nano}
-model_dir=${CHATTERBOX_MODEL_DIR:-models/chatterbox-nano}
+model_dir=${CHATTERBOX_MODEL_DIR:-models/chatterbox-$model}
 device=${CHATTERBOX_DEVICE:-mps}
 reference=${TTS_SPEAKER_FILE:-}
 

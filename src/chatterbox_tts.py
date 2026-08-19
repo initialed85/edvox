@@ -15,9 +15,11 @@ def main() -> int:
     parser.add_argument("--output", "-o", default="audio/chatterbox.wav")
     parser.add_argument("--reference", default=os.environ.get("TTS_SPEAKER_FILE", ""))
     parser.add_argument("--device", default=os.environ.get("CHATTERBOX_DEVICE", "mps"))
-    parser.add_argument("--model-dir", default=os.environ.get("CHATTERBOX_MODEL_DIR", "models/chatterbox-nano"))
+    parser.add_argument("--model-dir", default=None)
     parser.add_argument("--model", choices=("nano", "turbo"), default=os.environ.get("CHATTERBOX_MODEL", "nano"))
     args = parser.parse_args()
+    if args.model_dir is None:
+        args.model_dir = os.environ.get("CHATTERBOX_MODEL_DIR", f"models/chatterbox-{args.model}")
 
     import torch
     import torchaudio as ta

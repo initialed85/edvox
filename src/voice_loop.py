@@ -134,7 +134,10 @@ def speak_chatterbox(text: str, output: Path) -> None:
         text, "--output", str(output),
         "--device", env("CHATTERBOX_DEVICE", "mps"),
         "--model", env("CHATTERBOX_MODEL", "nano"),
-        "--model-dir", env("CHATTERBOX_MODEL_DIR", str(ROOT / "models" / "chatterbox-nano")),
+        "--model-dir", env(
+            "CHATTERBOX_MODEL_DIR",
+            str(ROOT / "models" / f"chatterbox-{env('CHATTERBOX_MODEL', 'nano')}"),
+        ),
     ]
     speaker = env("TTS_SPEAKER_FILE", "")
     if speaker:
