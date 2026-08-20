@@ -13,7 +13,10 @@ A local browser frontend is available on port `8200`. It provides session-local
 backend selection, system prompts, voice-reference upload, text chat, generated
 audio playback, and a push-to-talk button. The browser microphone permission is
 ordinary `getUserMedia` permission; no macOS Accessibility permission is needed
-for the button. Spacebar PTT works while the page is focused.
+for the button. Spacebar PTT is opt-in via the `Enable Spacebar PTT` checkbox;
+this prevents the browser's normal Spacebar scroll behavior from being hijacked
+unless explicitly enabled. The settings panel also has `Record my voice`, which
+records a browser microphone clip and installs it as the session's clone voice.
 
 Start the frontend and its resident services:
 
