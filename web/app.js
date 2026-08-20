@@ -66,16 +66,20 @@ function setBusy(busy, activity = '') {
   $('activity').textContent = activity;
 }
 
+function voxIsOccupied() {
+  return state.voxEnabled && state.voxPhase !== 'armed';
+}
+
 function scheduleAutonomousCheck() {
   if (state.autonomousTimer) clearTimeout(state.autonomousTimer);
   state.autonomousTimer = null;
-  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || state.voxEnabled) return;
+  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || voxIsOccupied()) return;
   state.autonomousTimer = setTimeout(runAutonomousCheck, Math.max(1, state.autonomousAfterSeconds) * 1000);
 }
 
 async function runAutonomousCheck() {
   state.autonomousTimer = null;
-  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || state.voxEnabled || state.autonomousInFlight) return;
+  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || voxIsOccupied() || state.autonomousInFlight) return;
   if ([...document.querySelectorAll('audio')].some((audio) => !audio.paused && !audio.ended)) {
     scheduleAutonomousCheck();
     return;
@@ -90,7 +94,14 @@ async function runAutonomousCheck() {
     }
     if (!result.skipped) {
       state.autonomousBlocked = true;
-      if (!result.no_reply && result.reply) addMessage('assistant', result.reply, result.audio_url);
+      if (!result.no_reply && result.reply) {
+        const audio = addMessage('assistant', result.reply, result.audio_url);
+        if (audio && state.voxEnabled) {
+          setVoxPhase('speaking');
+          await waitForPlayback(audio);
+          if (state.voxEnabled) setVoxPhase('armed');
+        }
+      }
     }
   } catch (error) {
     showError(error);
@@ -358,6 +369,7 @@ function setVoxPhase(phase) {
     setVoxStatus('Speaking… VOX pauses while the reply plays.');
   }
   refreshControls();
+  if (phase === 'armed') scheduleAutonomousCheck();
 }
 
 function voxThresholds() {
@@ -496,6 +508,7 @@ async function enableVox() {
     showError(error);
   } finally {
     setBusy(false);
+    scheduleAutonomousCheck();
   }
 }
 
