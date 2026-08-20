@@ -431,6 +431,8 @@ class Handler(BaseHTTPRequestHandler):
                 with session.lock:
                     session.messages.clear()
                     session.system_prompt = ""
+                    if session.reference:
+                        session.reference.unlink(missing_ok=True)
                     session.reference = None
                 self.send_json(200, public_session(session))
                 return
