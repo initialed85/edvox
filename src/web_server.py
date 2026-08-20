@@ -524,7 +524,7 @@ class WebServer(ThreadingHTTPServer):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default=env("WEB_HOST", "127.0.0.1"))
+    parser.add_argument("--host", default=env("WEB_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(env("WEB_PORT", "8200")))
     args = parser.parse_args()
     if not WEB_ROOT.is_dir():

@@ -13,7 +13,12 @@ A local browser frontend is available on port `8200`. It provides session-local
 backend selection, system prompts, voice-reference upload, text chat, generated
 audio playback, and a push-to-talk button. The browser microphone permission is
 ordinary `getUserMedia` permission; no macOS Accessibility permission is needed
-for the button. Spacebar PTT is opt-in via the `Enable Spacebar PTT` checkbox;
+for the button. The default web binding is `0.0.0.0`, so the UI can be opened
+from another device on the same LAN at `http://192.168.137.111:8200`. The
+backend services remain on loopback; only the browser-facing web UI is exposed.
+If macOS prompts to allow incoming connections, permit Python for the local
+network. Do not forward this port to the public internet without adding
+authentication and HTTPS. Spacebar PTT is opt-in via the `Enable Spacebar PTT` checkbox;
 this prevents the browser's normal Spacebar scroll behavior from being hijacked
 unless explicitly enabled. The settings panel also has `Record my voice`, which
 records a browser microphone clip and installs it as the session's clone voice.
@@ -48,8 +53,9 @@ Start the frontend and its resident services:
 ./scripts/start-web-background.sh
 ```
 
-Then open <http://127.0.0.1:8200>. The frontend is bound to localhost by
-default. To access it from another machine, use an SSH tunnel:
+Then open <http://127.0.0.1:8200>. For a local-only binding, set `WEB_HOST=127.0.0.1`. To access the LAN-bound
+frontend from another machine, open `http://192.168.137.111:8200` or use an SSH
+tunnel:
 
 ```bash
 ssh -N -L 8200:127.0.0.1:8200 edwardbeech@192.168.137.111
@@ -160,8 +166,10 @@ Stop only a server started by the background launcher:
 ./scripts/stop-chat.sh
 ```
 
-The launcher defaults to localhost for safety. Set `CHAT_HOST=0.0.0.0` if the
-server must be reachable from another machine. The first launch can take time
+The chat server launcher defaults to localhost for safety. Set
+`CHAT_HOST=0.0.0.0` only if the chat API itself must be reachable from another
+machine; the browser frontend does not need this because it proxies chat,
+Whisper, and TTS locally. The first launch can take time
 to map the model; later launches reuse the local Hugging Face cache.
 
 Useful server tuning variables:
