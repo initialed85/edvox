@@ -7,6 +7,36 @@ host. The components are deliberately replaceable:
 microphone -> Whisper STT -> llama-server chat -> TTS backend -> speakers
 ```
 
+## Web frontend
+
+A local browser frontend is available on port `8200`. It provides session-local
+backend selection, system prompts, voice-reference upload, text chat, generated
+audio playback, and a push-to-talk button. The browser microphone permission is
+ordinary `getUserMedia` permission; no macOS Accessibility permission is needed
+for the button. Spacebar PTT works while the page is focused.
+
+Start the frontend and its resident services:
+
+```bash
+./scripts/start-chat-background.sh
+./scripts/start-whisper-background.sh
+./scripts/start-tts-background.sh
+./scripts/start-web-background.sh
+```
+
+Then open <http://127.0.0.1:8200>. The frontend is bound to localhost by
+default. To access it from another machine, use an SSH tunnel:
+
+```bash
+ssh -N -L 8200:127.0.0.1:8200 edwardbeech@192.168.137.111
+```
+
+Stop the frontend with:
+
+```bash
+./scripts/stop-web.sh
+```
+
 ## Spacebar input modes
 
 The normal fixed-duration microphone mode records `RECORD_SECONDS` seconds.
