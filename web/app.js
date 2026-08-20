@@ -4,7 +4,7 @@ const state = {
   recordingStream: null,
   busy: false,
   pressed: false,
-  spacePttEnabled: true,
+  spacePttEnabled: false,
   cloneRecording: false,
 };
 
