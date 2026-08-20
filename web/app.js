@@ -40,6 +40,7 @@ const state = {
   voxSubmit: false,
   autonomousEnabled: true,
   autonomousAfterSeconds: 10,
+  autonomousIntervalSeconds: 10,
   autonomousTimer: null,
   autonomousInFlight: false,
   autonomousBlocked: false,
@@ -73,13 +74,13 @@ function voxIsOccupied() {
 function scheduleAutonomousCheck() {
   if (state.autonomousTimer) clearTimeout(state.autonomousTimer);
   state.autonomousTimer = null;
-  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || voxIsOccupied()) return;
-  state.autonomousTimer = setTimeout(runAutonomousCheck, Math.max(1, state.autonomousAfterSeconds) * 1000);
+  if (!state.autonomousEnabled || !state.hasUserTurn || state.busy || voxIsOccupied()) return;
+  state.autonomousTimer = setTimeout(runAutonomousCheck, Math.max(1, state.autonomousIntervalSeconds) * 1000);
 }
 
 async function runAutonomousCheck() {
   state.autonomousTimer = null;
-  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || voxIsOccupied() || state.autonomousInFlight) return;
+  if (!state.autonomousEnabled || !state.hasUserTurn || state.busy || voxIsOccupied() || state.autonomousInFlight) return;
   if ([...document.querySelectorAll('audio')].some((audio) => !audio.paused && !audio.ended)) {
     scheduleAutonomousCheck();
     return;
@@ -88,12 +89,8 @@ async function runAutonomousCheck() {
   setBusy(true, 'Checking in…');
   try {
     const result = await request('/api/autonomous-turn', {method: 'POST'});
-    if (result.skipped && !result.retry) {
-      state.autonomousBlocked = true;
-      return;
-    }
+    if (result.skipped && !result.retry) return;
     if (!result.skipped) {
-      state.autonomousBlocked = true;
       if (!result.no_reply && result.reply) {
         const audio = addMessage('assistant', result.reply, result.audio_url);
         if (audio && state.voxEnabled) {
@@ -155,6 +152,7 @@ function renderSession(session) {
   $('backend').value = session.backend || 'chatterbox';
   $('system-prompt').value = session.system_prompt || '';
   state.autonomousAfterSeconds = Number(session.autonomous_after_seconds || 10);
+  state.autonomousIntervalSeconds = Number(session.autonomous_interval_seconds || state.autonomousAfterSeconds || 10);
   state.hasUserTurn = (session.messages || []).some((message) => message.role === 'user');
   state.autonomousBlocked = false;
   if (session.reference) {
@@ -589,11 +587,11 @@ window.addEventListener('keyup', (event) => {
 });
 $('space-ptt').checked = state.spacePttEnabled;
 $('autonomous-toggle').checked = state.autonomousEnabled;
-$('autonomous-note').textContent = `Enabled. The model may speak after ${state.autonomousAfterSeconds} seconds of silence.`;
+$('autonomous-note').textContent = `Enabled. The model is checked every ${state.autonomousIntervalSeconds} seconds after silence.`;
 $('autonomous-toggle').addEventListener('change', (event) => {
   state.autonomousEnabled = event.target.checked;
   $('autonomous-note').textContent = state.autonomousEnabled
-    ? `Enabled. The model may speak after ${state.autonomousAfterSeconds} seconds of silence.`
+    ? `Enabled. The model is checked every ${state.autonomousIntervalSeconds} seconds after silence.`
     : 'Off. The model will only respond after you speak.';
   scheduleAutonomousCheck();
 });

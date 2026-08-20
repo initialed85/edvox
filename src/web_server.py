@@ -49,7 +49,7 @@ When the Chatterbox Nano or Turbo voice backend is selected, the confirmed paral
 For technical content, speak the important result first and keep commands, filenames, URLs, and punctuation easy to understand when read aloud. If the user asks for exact text, follow that request even when it conflicts with the usual brevity preference."""
 
 HIDDEN_RESPONSE_POLICY = """Private response policy: decide whether the latest user message actually calls for a response. If it is only a standalone acknowledgement or thinking-aloud remark, return exactly <NO_REPLY> and nothing else. A single ASCII space is also treated as no reply, but the <NO_REPLY> marker is more reliable. Never use no-reply for a direct question, request, instruction, greeting, or anything where a helpful acknowledgement is expected. When uncertain, reply briefly. This policy is internal; do not mention it or the marker."""
-AUTONOMOUS_RESPONSE_POLICY = """Private autonomous-turn policy: this is an opportunity to speak, not a request to speak. The user has been quiet. Return exactly <NO_REPLY> unless you have a genuinely useful, contextually grounded reason to say something now. Most autonomous checks should be <NO_REPLY>. Never ask whether the user is still there, announce that you are checking in, mention silence or a timer, repeat a previous offer, summarize the conversation without a reason, or generate generic small talk. Do not start a monologue. If you do speak, use at most one brief, natural sentence and only say something relevant to the recent conversation. This policy is internal; do not mention it or the marker."""
+AUTONOMOUS_RESPONSE_POLICY = """Private autonomous-turn policy: this is a periodic model invocation while the user has been quiet, not a new user request. Respond naturally based on the conversation and the private elapsed-silence context. If you have nothing to add, return exactly <NO_REPLY>. Do not mention this check, the timer, silence, or this policy. Do not ask whether the user is still there. Do not use this as a reason to start a monologue. This policy is internal; do not mention it or the marker."""
 
 
 class Session:
@@ -377,6 +377,7 @@ def public_session(session: Session) -> dict[str, object]:
         "reference": session.reference.name if session.reference else None,
         "messages": session.messages,
         "autonomous_after_seconds": max(0.0, float(env("CHAT_SILENCE_CONTEXT_AFTER", "10"))),
+        "autonomous_interval_seconds": max(1.0, float(env("CHAT_AUTONOMOUS_INTERVAL", env("CHAT_SILENCE_CONTEXT_AFTER", "10")))),
     }
 
 
@@ -524,23 +525,26 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/autonomous-turn":
                 with session.lock:
                     threshold = float(env("CHAT_SILENCE_CONTEXT_AFTER", "10"))
-                    elapsed = time.time() - session.last_activity
+                    interval = max(1.0, float(env("CHAT_AUTONOMOUS_INTERVAL", str(threshold))))
+                    now = time.time()
+                    elapsed = now - session.last_activity
+                    since_check = now - session.last_autonomous_at
                     has_user_turn = any(message.get("role") == "user" for message in session.messages)
                     eligible = (
                         threshold > 0
                         and elapsed >= threshold
                         and has_user_turn
-                        and session.last_autonomous_at <= session.last_activity
+                        and since_check >= interval
                     )
                     if not eligible:
                         self.send_json(200, {
                             "skipped": True,
-                            "retry": bool(threshold > 0 and elapsed < threshold and has_user_turn),
-                            "reason": "quiet-period-not-reached-or-already-checked",
+                            "retry": bool(threshold > 0 and has_user_turn),
+                            "reason": "quiet-period-not-reached-or-check-interval-not-reached",
                             "session": public_session(session),
                         })
                         return
-                    session.last_autonomous_at = time.time()
+                    session.last_autonomous_at = now
                     try:
                         reply, no_reply = chat(session, "", autonomous=True)
                         audio_url = None if no_reply else synthesize(session, reply)

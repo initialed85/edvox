@@ -40,12 +40,13 @@ button PTT or ordinary text chat.
 
 The session also has an opt-in **Enable autonomous check-ins** switch. When it
 is enabled, the browser waits until the configured quiet period has elapsed,
-then makes one small model request asking whether there is a genuinely useful,
-contextually grounded reason to speak. Most checks should return `<NO_REPLY>`;
-the model is capped at a short response and is told not to ask whether you are
-still there, mention the timer, or start a monologue. Any real user message
-resets the quiet-period timer. The switch is enabled by default for this experiment, and it pauses while
-VOX is listening or while another request is active. Turn it off if the
+then makes a small model request. The model sees the elapsed quiet time and the
+conversation, and can either return `<NO_REPLY>` or speak naturally. Checks
+repeat at the configured interval for as long as the session remains quiet;
+there is no extra instruction trying to motivate a response. Any real user
+message resets the quiet-period timer. The switch is enabled by default for
+this experiment, and checks pause while VOX is recording, processing, or
+speaking. VOX may remain enabled and armed while checks run. Turn it off if the
 assistant becomes too chatty.
 
 New sessions start with a voice-oriented system prompt that can be edited or
@@ -395,11 +396,10 @@ A normal one-shot invocation (`--text`, `--audio`, or one microphone turn) also
 has no persistent history.
 
 The web session also supplies a private timing hint after a configurable quiet
-period (`CHAT_SILENCE_CONTEXT_AFTER`, default 10 seconds). This can help the
-model make a natural re-entry response, but it is instructed not to mention the
-timer or invent a reason to speak. The browser's autonomous check-in switch
-uses the same interval. If the model returns `<NO_REPLY>`, the web frontend
-records the turn but skips TTS and displays no assistant bubble.
+period (`CHAT_SILENCE_CONTEXT_AFTER`, default 10 seconds). Autonomous checks
+repeat every `CHAT_AUTONOMOUS_INTERVAL` seconds, defaulting to the same
+10-second value. If the model returns `<NO_REPLY>`, the web frontend skips TTS
+and displays no assistant bubble.
 
 ## One-shot examples
 
