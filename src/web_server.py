@@ -28,6 +28,8 @@ AUDIO_ROOT = ROOT / "audio" / "web"
 # limit so long recordings are accepted; they are still converted before use.
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_TEXT_LENGTH = 20_000
+IGNORED_TRANSCRIPTS = {"", "[blank_audio]", "[ silence ]", "silence"}
+IGNORED_FILLERS = {"uh", "um", "er", "erm", "hmm", "hm", "mm", "mmm"}
 SESSION_COOKIE = "voicechat_session"
 DEFAULT_SYSTEM_PROMPT = """You are a concise, warm, conversational voice assistant.
 
@@ -295,10 +297,16 @@ def transcribe(audio: Path) -> str:
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or error.stdout or "").strip()
         raise RuntimeError(f"speech recognition failed: {detail[-1000:]}") from error
-    text = result.stdout.strip()
-    if not text:
-        raise RuntimeError("speech recognition returned no text")
-    return text
+    return result.stdout.strip()
+
+
+def transcript_is_ignored(text: str) -> bool:
+    """Reject empty/noise-only STT output before invoking the chat model."""
+    normalized = " ".join(text.lower().split())
+    if not normalized or normalized in IGNORED_TRANSCRIPTS:
+        return True
+    words = re.findall(r"[a-z']+", normalized)
+    return bool(words) and len(words) <= 3 and all(word in IGNORED_FILLERS for word in words)
 
 
 def public_session(session: Session) -> dict[str, object]:
@@ -475,15 +483,25 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     with session.lock:
                         transcript = transcribe(input_path)
-                        reply = chat(session, transcript)
-                        audio_url = synthesize(session, reply)
-                        result = {
-                            "transcript": transcript,
-                            "reply": reply,
-                            "audio_url": audio_url,
-                            "input_seconds": round(duration, 2),
-                            "session": public_session(session),
-                        }
+                        if transcript_is_ignored(transcript):
+                            result = {
+                                "ignored": True,
+                                "reason": "empty-or-noise-transcript",
+                                "transcript": transcript,
+                                "input_seconds": round(duration, 2),
+                                "session": public_session(session),
+                            }
+                        else:
+                            reply = chat(session, transcript)
+                            audio_url = synthesize(session, reply)
+                            result = {
+                                "ignored": False,
+                                "transcript": transcript,
+                                "reply": reply,
+                                "audio_url": audio_url,
+                                "input_seconds": round(duration, 2),
+                                "session": public_session(session),
+                            }
                     self.send_json(200, result)
                 finally:
                     input_path.unlink(missing_ok=True)

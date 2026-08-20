@@ -49,7 +49,7 @@
           <div id="empty-state" class="empty-state">
             <div class="orb">◉</div>
             <h2>Ready when you are.</h2>
-            <p>Send a text message or hold the PTT button to speak.</p>
+            <p>Enable VOX, send a text message, or hold the PTT button to speak.</p>
           </div>
         </div>
         <div id="activity" class="activity" hidden></div>
@@ -62,6 +62,12 @@
             <button id="send-button" class="send-button" type="submit">Send <span>↗</span></button>
           </div>
         </form>
+        <div class="vox-controls">
+          <button id="vox-toggle" class="vox-button" type="button">
+            <span class="vox-dot" aria-hidden="true"></span><span class="vox-label">Enable VOX</span>
+          </button>
+          <span id="vox-status" class="vox-status">VOX is off. Enable it to listen for speech locally.</span>
+        </div>
         <label class="keyboard-toggle"><input id="space-ptt" type="checkbox"> Enable Spacebar PTT</label>
         <p id="keyboard-note" class="keyboard-note">Enter sends · Shift+Enter inserts a new line · Spacebar is navigation only.</p>
       </div>

@@ -1,3 +1,16 @@
+const VOX_CONFIG = {
+  calibrationMs: 800,
+  minSpeechMs: 300,
+  silenceMs: 800,
+  maxUtteranceMs: 30000,
+  startFloor: 0.012,
+  minStartRms: 0.025,
+  startMultiplier: 2.5,
+  startMargin: 0.012,
+  speechMultiplier: 1.6,
+  speechMargin: 0.006,
+};
+
 const state = {
   mediaRecorder: null,
   recordingChunks: [],
@@ -6,16 +19,39 @@ const state = {
   pressed: false,
   spacePttEnabled: false,
   cloneRecording: false,
+  voxEnabled: false,
+  voxPhase: 'off',
+  voxStream: null,
+  voxContext: null,
+  voxAnalyser: null,
+  voxData: null,
+  voxAnimationFrame: null,
+  voxStartedAt: 0,
+  voxNoiseFloor: VOX_CONFIG.startFloor,
+  voxCalibrated: false,
+  voxRecorder: null,
+  voxChunks: [],
+  voxCandidateSince: 0,
+  voxLastSpeechAt: 0,
+  voxSubmit: false,
 };
 
 const $ = (id) => document.getElementById(id);
 
+function refreshControls() {
+  $('send-button').disabled = state.busy;
+  $('ptt-button').disabled = state.busy || state.voxEnabled;
+  $('clone-voice-button').disabled = state.busy || state.voxEnabled;
+  $('voice-file').disabled = state.busy || state.voxEnabled;
+  $('save-settings').disabled = state.busy;
+  // Keep the VOX button available while VOX is processing so it can be
+  // disabled if the user wants to stop listening before the response returns.
+  $('vox-toggle').disabled = state.busy && !state.voxEnabled;
+}
+
 function setBusy(busy, activity = '') {
   state.busy = busy;
-  $('send-button').disabled = busy;
-  $('ptt-button').disabled = busy;
-  $('clone-voice-button').disabled = busy;
-  $('save-settings').disabled = busy;
+  refreshControls();
   $('activity').hidden = !activity;
   $('activity').textContent = activity;
 }
@@ -46,8 +82,9 @@ function addMessage(role, text, audioUrl = '') {
   body.className = 'message-body';
   body.textContent = text;
   item.append(label, body);
+  let audio = null;
   if (audioUrl) {
-    const audio = document.createElement('audio');
+    audio = document.createElement('audio');
     audio.controls = true;
     audio.autoplay = true;
     audio.src = audioUrl;
@@ -55,6 +92,7 @@ function addMessage(role, text, audioUrl = '') {
   }
   $('messages').append(item);
   $('messages').scrollTop = $('messages').scrollHeight;
+  return audio;
 }
 
 function renderSession(session) {
@@ -69,7 +107,7 @@ function renderSession(session) {
   }
   $('messages').querySelectorAll('.message, .empty-state').forEach((node) => node.remove());
   if (!(session.messages || []).length) {
-    $('messages').insertAdjacentHTML('afterbegin', '<div id="empty-state" class="empty-state"><div class="orb">◉</div><h2>Ready when you are.</h2><p>Send a text message or hold the PTT button to speak.</p></div>');
+    $('messages').insertAdjacentHTML('afterbegin', '<div id="empty-state" class="empty-state"><div class="orb">◉</div><h2>Ready when you are.</h2><p>Enable VOX, send a text message, or hold the PTT button to speak.</p></div>');
   }
   (session.messages || []).forEach((message, index) => {
     if (message.role === 'user') {
@@ -130,26 +168,59 @@ async function uploadVoice(file) {
   finally { setBusy(false); }
 }
 
-async function handleAudio(blob) {
-  setBusy(true, 'Transcribing, thinking, and synthesizing…');
+async function waitForPlayback(audio) {
+  if (!audio) return;
+  if (audio.paused) {
+    try { await audio.play(); } catch (_) { return; }
+  }
+  if (audio.ended) return;
+  await new Promise((resolve) => {
+    let timer;
+    const done = () => {
+      clearTimeout(timer);
+      audio.removeEventListener('ended', done);
+      audio.removeEventListener('error', done);
+      resolve();
+    };
+    timer = setTimeout(done, 120000);
+    audio.addEventListener('ended', done, {once: true});
+    audio.addEventListener('error', done, {once: true});
+  });
+}
+
+async function handleAudio(blob, {vox = false} = {}) {
+  setBusy(true, vox ? 'Transcribing…' : 'Transcribing, thinking, and synthesizing…');
   try {
     const form = new FormData();
     form.append('audio', blob, 'microphone.webm');
     const result = await request('/api/voice-turn', {method: 'POST', body: form});
+    if (result.ignored) return;
     addMessage('user', result.transcript);
-    addMessage('assistant', result.reply, result.audio_url);
+    const audio = addMessage('assistant', result.reply, result.audio_url);
+    if (vox) {
+      setVoxPhase('speaking');
+      setBusy(true, 'Speaking…');
+      await waitForPlayback(audio);
+    }
   } catch (error) { showError(error); }
-  finally { setBusy(false); }
+  finally {
+    setBusy(false);
+    if (vox && state.voxEnabled) setVoxPhase('armed');
+  }
+}
+
+function recorderOptions() {
+  return MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? {mimeType: 'audio/webm;codecs=opus'} : {};
 }
 
 async function startRecording({clone = false} = {}) {
-  if (state.busy || state.mediaRecorder) return;
+  if (state.busy || state.mediaRecorder || state.voxEnabled) return;
   state.cloneRecording = clone;
   try {
     state.recordingStream = await navigator.mediaDevices.getUserMedia({audio: true});
     state.recordingChunks = [];
-    const options = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? {mimeType: 'audio/webm;codecs=opus'} : {};
-    state.mediaRecorder = new MediaRecorder(state.recordingStream, options);
+    state.mediaRecorder = new MediaRecorder(state.recordingStream, recorderOptions());
     state.mediaRecorder.ondataavailable = (event) => event.data.size && state.recordingChunks.push(event.data);
     state.mediaRecorder.onstop = () => {
       const blob = new Blob(state.recordingChunks, {type: state.mediaRecorder?.mimeType || 'audio/webm'});
@@ -187,6 +258,186 @@ function stopRecording() {
   if (state.mediaRecorder?.state === 'recording') state.mediaRecorder.stop();
 }
 
+function setVoxStatus(text) {
+  $('vox-status').textContent = text;
+}
+
+function setVoxPhase(phase) {
+  state.voxPhase = phase;
+  const button = $('vox-toggle');
+  const label = button.querySelector('.vox-label');
+  const enabled = state.voxEnabled;
+  button.classList.toggle('active', enabled);
+  button.classList.toggle('recording', phase === 'recording');
+  label.textContent = enabled ? 'Disable VOX' : 'Enable VOX';
+  if (!enabled || phase === 'off') {
+    setVoxStatus('VOX is off. Enable it to listen for speech locally.');
+  } else if (phase === 'armed') {
+    setVoxStatus(state.voxCalibrated ? 'Listening locally… speak when ready.' : 'Calibrating microphone…');
+  } else if (phase === 'recording') {
+    setVoxStatus('Speech detected — waiting for the end of your utterance…');
+  } else if (phase === 'processing') {
+    setVoxStatus('Transcribing and responding…');
+  } else if (phase === 'speaking') {
+    setVoxStatus('Speaking… VOX pauses while the reply plays.');
+  }
+  refreshControls();
+}
+
+function voxThresholds() {
+  return {
+    start: Math.max(VOX_CONFIG.minStartRms, state.voxNoiseFloor * VOX_CONFIG.startMultiplier + VOX_CONFIG.startMargin),
+    speech: Math.max(0.018, state.voxNoiseFloor * VOX_CONFIG.speechMultiplier + VOX_CONFIG.speechMargin),
+  };
+}
+
+function rmsFromAnalyser() {
+  state.voxAnalyser.getByteTimeDomainData(state.voxData);
+  let sum = 0;
+  for (const value of state.voxData) {
+    const sample = (value - 128) / 128;
+    sum += sample * sample;
+  }
+  return Math.sqrt(sum / state.voxData.length);
+}
+
+function startVoxRecorder(now) {
+  if (!state.voxEnabled || state.voxRecorder || state.busy) return;
+  let recorder;
+  try {
+    recorder = new MediaRecorder(state.voxStream, recorderOptions());
+    state.voxChunks = [];
+    state.voxRecorder = recorder;
+    state.voxCandidateSince = now;
+    state.voxLastSpeechAt = now;
+    state.voxSubmit = false;
+    recorder.ondataavailable = (event) => event.data.size && state.voxChunks.push(event.data);
+    recorder.onerror = () => {
+      showError(new Error('browser audio recording failed'));
+      state.voxSubmit = false;
+      if (recorder.state === 'recording') recorder.stop();
+    };
+    recorder.onstop = () => {
+      const blob = new Blob(state.voxChunks, {type: recorder.mimeType || 'audio/webm'});
+      if (state.voxRecorder === recorder) state.voxRecorder = null;
+      state.voxChunks = [];
+      const submit = state.voxSubmit;
+      state.voxSubmit = false;
+      state.voxCandidateSince = 0;
+      state.voxLastSpeechAt = 0;
+      if (submit && blob.size && state.voxEnabled) {
+        setVoxPhase('processing');
+        handleAudio(blob, {vox: true});
+      } else if (state.voxEnabled) {
+        setVoxPhase('armed');
+      }
+    };
+    recorder.start(100);
+    setVoxPhase('recording');
+  } catch (error) {
+    showError(error);
+    state.voxRecorder = null;
+    state.voxChunks = [];
+  }
+}
+
+function stopVoxRecorder(submit) {
+  const recorder = state.voxRecorder;
+  if (!recorder) {
+    if (state.voxEnabled) setVoxPhase('armed');
+    return;
+  }
+  state.voxSubmit = submit;
+  if (recorder.state === 'recording') recorder.stop();
+}
+
+function voxTick(now) {
+  if (!state.voxEnabled || !state.voxAnalyser) return;
+  const rms = rmsFromAnalyser();
+  const elapsed = now - state.voxStartedAt;
+  const calibrating = elapsed < VOX_CONFIG.calibrationMs;
+  const thresholds = voxThresholds();
+
+  if (state.voxPhase === 'armed' && !state.busy) {
+    if (rms < thresholds.start) {
+      state.voxNoiseFloor = state.voxNoiseFloor * 0.95 + rms * 0.05;
+    }
+    if (!calibrating && rms > thresholds.start) startVoxRecorder(now);
+    if (!calibrating && !state.voxCalibrated) {
+      state.voxCalibrated = true;
+      setVoxStatus('Listening locally… speak when ready.');
+    }
+  } else if (state.voxPhase === 'recording' && !state.busy) {
+    if (rms > thresholds.speech) {
+      state.voxLastSpeechAt = now;
+    } else if (now - state.voxLastSpeechAt >= VOX_CONFIG.silenceMs) {
+      const longEnough = now - state.voxCandidateSince >= VOX_CONFIG.minSpeechMs;
+      stopVoxRecorder(longEnough);
+    } else if (now - state.voxCandidateSince >= VOX_CONFIG.maxUtteranceMs) {
+      stopVoxRecorder(true);
+    }
+  }
+  state.voxAnimationFrame = requestAnimationFrame(voxTick);
+}
+
+async function enableVox() {
+  if (state.busy || state.voxEnabled) return;
+  setBusy(true, 'Requesting microphone permission…');
+  try {
+    if (!navigator.mediaDevices?.getUserMedia) throw new Error('this browser does not support microphone capture');
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error('this browser does not support local audio analysis');
+    state.voxStream = await navigator.mediaDevices.getUserMedia({
+      audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true},
+    });
+    state.voxContext = new AudioContextClass();
+    await state.voxContext.resume();
+    const source = state.voxContext.createMediaStreamSource(state.voxStream);
+    state.voxAnalyser = state.voxContext.createAnalyser();
+    state.voxAnalyser.fftSize = 1024;
+    state.voxAnalyser.smoothingTimeConstant = 0;
+    source.connect(state.voxAnalyser);
+    state.voxData = new Uint8Array(state.voxAnalyser.fftSize);
+    state.voxStartedAt = performance.now();
+    state.voxNoiseFloor = VOX_CONFIG.startFloor;
+    state.voxCalibrated = false;
+    state.voxEnabled = true;
+    setVoxPhase('armed');
+    state.voxAnimationFrame = requestAnimationFrame(voxTick);
+  } catch (error) {
+    state.voxEnabled = false;
+    state.voxAnalyser = null;
+    state.voxData = null;
+    state.voxStream?.getTracks().forEach((track) => track.stop());
+    state.voxStream = null;
+    if (state.voxContext) state.voxContext.close().catch(() => {});
+    state.voxContext = null;
+    setVoxPhase('off');
+    showError(error);
+  } finally {
+    setBusy(false);
+  }
+}
+
+function disableVox() {
+  state.voxEnabled = false;
+  state.voxSubmit = false;
+  if (state.voxAnimationFrame) cancelAnimationFrame(state.voxAnimationFrame);
+  state.voxAnimationFrame = null;
+  if (state.voxRecorder?.state === 'recording') state.voxRecorder.stop();
+  state.voxRecorder = null;
+  state.voxChunks = [];
+  state.voxStream?.getTracks().forEach((track) => track.stop());
+  state.voxStream = null;
+  if (state.voxContext) state.voxContext.close().catch(() => {});
+  state.voxContext = null;
+  state.voxAnalyser = null;
+  state.voxData = null;
+  state.voxPhase = 'off';
+  setVoxPhase('off');
+  refreshControls();
+}
+
 $('chat-form').addEventListener('submit', (event) => {
   event.preventDefault();
   sendText($('message').value);
@@ -207,6 +458,10 @@ $('reset-button').addEventListener('click', async () => {
   try { renderSession(await request('/api/session/reset', {method: 'POST'})); }
   catch (error) { showError(error); }
 });
+$('vox-toggle').addEventListener('click', () => {
+  if (state.voxEnabled) disableVox();
+  else enableVox().catch(showError);
+});
 
 const ptt = $('ptt-button');
 ptt.addEventListener('pointerdown', (event) => { event.preventDefault(); state.pressed = true; startRecording(); });
@@ -223,7 +478,7 @@ cloneButton.addEventListener('pointerleave', (event) => { if (state.pressed && e
 function shouldHandleSpace(event) {
   const target = event.target;
   const isFormControl = target instanceof Element && target.closest('textarea, input, select, button');
-  return event.code === 'Space' && !event.repeat && !state.busy && !isFormControl && state.spacePttEnabled;
+  return event.code === 'Space' && !event.repeat && !state.busy && !state.voxEnabled && !isFormControl && state.spacePttEnabled;
 }
 window.addEventListener('keydown', (event) => {
   if (!shouldHandleSpace(event)) return;
@@ -249,5 +504,10 @@ window.addEventListener('blur', () => {
     stopRecording();
   }
 });
+window.addEventListener('beforeunload', () => {
+  if (state.voxEnabled) disableVox();
+});
 
+setVoxPhase('off');
+refreshControls();
 loadSession().catch(showError);
