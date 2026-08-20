@@ -43,8 +43,6 @@ const state = {
   autonomousIntervalSeconds: 10,
   autonomousTimer: null,
   autonomousInFlight: false,
-  autonomousBlocked: false,
-  hasUserTurn: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -74,13 +72,13 @@ function voxIsOccupied() {
 function scheduleAutonomousCheck() {
   if (state.autonomousTimer) clearTimeout(state.autonomousTimer);
   state.autonomousTimer = null;
-  if (!state.autonomousEnabled || !state.hasUserTurn || state.busy || voxIsOccupied()) return;
+  if (!state.autonomousEnabled || state.busy || voxIsOccupied()) return;
   state.autonomousTimer = setTimeout(runAutonomousCheck, Math.max(1, state.autonomousIntervalSeconds) * 1000);
 }
 
 async function runAutonomousCheck() {
   state.autonomousTimer = null;
-  if (!state.autonomousEnabled || !state.hasUserTurn || state.busy || voxIsOccupied() || state.autonomousInFlight) return;
+  if (!state.autonomousEnabled || state.busy || voxIsOccupied() || state.autonomousInFlight) return;
   if ([...document.querySelectorAll('audio')].some((audio) => !audio.paused && !audio.ended)) {
     scheduleAutonomousCheck();
     return;
@@ -153,8 +151,7 @@ function renderSession(session) {
   $('system-prompt').value = session.system_prompt || '';
   state.autonomousAfterSeconds = Number(session.autonomous_after_seconds || 10);
   state.autonomousIntervalSeconds = Number(session.autonomous_interval_seconds || state.autonomousAfterSeconds || 10);
-  state.hasUserTurn = (session.messages || []).some((message) => message.role === 'user');
-  state.autonomousBlocked = false;
+
   if (session.reference) {
     $('voice-status').textContent = session.reference;
     $('clear-voice').hidden = false;
@@ -196,8 +193,6 @@ async function saveSettings() {
 async function sendText(text) {
   if (!text.trim() || state.busy) return;
   $('message').value = '';
-  state.hasUserTurn = true;
-  state.autonomousBlocked = false;
   addMessage('user', text.trim());
   setBusy(true, 'Thinking and synthesizing…');
   try {
@@ -251,8 +246,6 @@ async function handleAudio(blob, {vox = false} = {}) {
     form.append('audio', blob, 'microphone.webm');
     const result = await request('/api/voice-turn', {method: 'POST', body: form});
     if (result.ignored) return;
-    state.hasUserTurn = true;
-    state.autonomousBlocked = false;
     addMessage('user', result.transcript);
     const audio = result.no_reply ? null : addMessage('assistant', result.reply, result.audio_url);
     if (vox) {

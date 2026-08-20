@@ -182,8 +182,8 @@ sequenceDiagram
     participant Chat as llama-server
     participant TTS as Chatterbox or Qwen
 
-    User->>Browser: Complete a real text or voice turn
-    Browser->>Browser: Reset timer and remain armed if VOX is enabled
+    User->>Browser: Open browser or complete a text/voice turn
+    Browser->>Browser: Start or reset timer; remain armed if VOX is enabled
     loop Every autonomous interval after the quiet threshold
         Browser->>Browser: Timer fires while page is open
         alt VOX recording, processing, speaking, another request, or audio playback
@@ -214,9 +214,9 @@ sequenceDiagram
 
 The wake-up mechanism is therefore **frontend timer plus backend eligibility
 check**. The backend does not wake itself and cannot initiate a request while
-no browser page is open. The model is invoked on every eligible interval; it is
-free to return `<NO_REPLY>` or respond based on the accumulated quiet-time
-context.
+no browser page is open. The model is invoked on every eligible interval, including before the first
+user message; it is free to return `<NO_REPLY>` or respond based on the
+available conversation and accumulated quiet-time context.
 
 ## Ports and bindings
 

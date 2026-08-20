@@ -248,10 +248,9 @@ def chat(session: Session, text: str, *, autonomous: bool = False) -> tuple[str,
     timing = silence_context(session)
     if timing:
         messages.insert(insert_at + (2 if autonomous else 1), timing)
-    prompt = (
-        "Private event: the user has been quiet. Decide whether a brief, genuinely useful "
-        "proactive remark is warranted. Return <NO_REPLY> if not."
-        if autonomous else text
+    prompt = text if not autonomous else (
+        "Private event: this is a periodic check while the conversation is quiet. "
+        "Respond naturally if you have something to say; otherwise return <NO_REPLY>."
     )
     messages.append({"role": "user", "content": prompt})
     body = {
@@ -516,6 +515,8 @@ class Handler(BaseHTTPRequestHandler):
                 with session.lock:
                     session.messages.clear()
                     session.system_prompt = DEFAULT_SYSTEM_PROMPT
+                    session.last_activity = time.time()
+                    session.last_autonomous_at = 0.0
                     if session.reference:
                         session.reference.unlink(missing_ok=True)
                     session.reference = None
@@ -529,17 +530,15 @@ class Handler(BaseHTTPRequestHandler):
                     now = time.time()
                     elapsed = now - session.last_activity
                     since_check = now - session.last_autonomous_at
-                    has_user_turn = any(message.get("role") == "user" for message in session.messages)
                     eligible = (
                         threshold > 0
                         and elapsed >= threshold
-                        and has_user_turn
                         and since_check >= interval
                     )
                     if not eligible:
                         self.send_json(200, {
                             "skipped": True,
-                            "retry": bool(threshold > 0 and has_user_turn),
+                            "retry": threshold > 0,
                             "reason": "quiet-period-not-reached-or-check-interval-not-reached",
                             "session": public_session(session),
                         })

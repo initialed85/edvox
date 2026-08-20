@@ -44,7 +44,8 @@ then makes a small model request. The model sees the elapsed quiet time and the
 conversation, and can either return `<NO_REPLY>` or speak naturally. Checks
 repeat at the configured interval for as long as the session remains quiet;
 there is no extra instruction trying to motivate a response. Any real user
-message resets the quiet-period timer. The switch is enabled by default for
+message resets the quiet-period timer. Checks can begin on a completely new
+session, before the first user message. The switch is enabled by default for
 this experiment, and checks pause while VOX is recording, processing, or
 speaking. VOX may remain enabled and armed while checks run. Turn it off if the
 assistant becomes too chatty.
