@@ -117,7 +117,7 @@ function renderSession(session) {
     if (message.role === 'user') {
       const answer = session.messages[index + 1];
       addMessage('user', message.content);
-      if (answer?.role === 'assistant') addMessage('assistant', answer.content);
+      if (answer?.role === 'assistant' && answer.content?.trim()) addMessage('assistant', answer.content);
     }
   });
 }
@@ -153,7 +153,7 @@ async function sendText(text) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text.trim()}),
     });
-    addMessage('assistant', result.reply, result.audio_url);
+    if (!result.no_reply) addMessage('assistant', result.reply, result.audio_url);
   } catch (error) {
     showError(error);
   } finally { setBusy(false); }
@@ -200,7 +200,7 @@ async function handleAudio(blob, {vox = false} = {}) {
     const result = await request('/api/voice-turn', {method: 'POST', body: form});
     if (result.ignored) return;
     addMessage('user', result.transcript);
-    const audio = addMessage('assistant', result.reply, result.audio_url);
+    const audio = result.no_reply ? null : addMessage('assistant', result.reply, result.audio_url);
     if (vox) {
       setVoxPhase('speaking');
       setBusy(true, 'Speaking…');

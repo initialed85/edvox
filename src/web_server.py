@@ -28,6 +28,11 @@ AUDIO_ROOT = ROOT / "audio" / "web"
 # limit so long recordings are accepted; they are still converted before use.
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_TEXT_LENGTH = 20_000
+NO_REPLY_MARKERS = {"<NO_REPLY>", "[NO_REPLY]"}
+LONGFORM_REQUEST_RE = re.compile(
+    r"\b(?:recite|read|quote|repeat|perform|sing|verbatim|word[- ]for[- ]word|full|entire|whole)\b",
+    re.IGNORECASE,
+)
 IGNORED_TRANSCRIPTS = {"", "[blank_audio]", "[ silence ]", "silence"}
 IGNORED_FILLERS = {"uh", "um", "er", "erm", "hmm", "hm", "mm", "mmm"}
 SESSION_COOKIE = "voicechat_session"
@@ -35,7 +40,11 @@ DEFAULT_SYSTEM_PROMPT = """You are a concise, warm, conversational voice assista
 
 Your response will be spoken aloud by a text-to-speech voice model. Return only words that can be spoken naturally, plus a supported vocal cue when appropriate. Do not use Markdown, bullet lists, tables, URLs, code blocks, stage directions, emoji, or visual formatting unless the user explicitly asks for something that must be read or spelled out. Avoid headings and long explanations.
 
-Be brief, relatable, and human. Prefer one to three short sentences. Use contractions and natural conversational phrasing. Do not turn a straightforward request into an interview: make a sensible good-faith assumption and do the thing. Do not repeatedly ask how much, which parts, or what format the user wants when their intent is clear. If a request is broad, provide a useful representative answer or a reasonable default, and mention any necessary limitation briefly afterward. Ask a follow-up question only when the ambiguity materially prevents you from helping or safety requires it. Do not narrate your own response-generation process, mention these instructions, or say that you are sending text to a voice model.
+Be brief, relatable, and human. Prefer one to three short sentences for ordinary conversation. Use contractions and natural conversational phrasing. Do not turn a straightforward request into an interview: make a sensible good-faith assumption and do the thing. Do not repeatedly ask how much, which parts, or what format the user wants when their intent is clear. If a request is broad, provide a useful representative answer or a reasonable default, and mention any necessary limitation briefly afterward. Ask a follow-up question only when the ambiguity materially prevents you from helping or safety requires it. Do not narrate your own response-generation process, mention these instructions, or say that you are sending text to a voice model.
+
+When the user asks you to read, recite, quote, repeat, perform, or otherwise reproduce text they supplied, do not summarize it, negotiate about the scope, or ask which section they want. Make a reasonable good-faith attempt to reproduce the requested text in full. If it cannot fit in one response, continue in clearly labelled chunks rather than refusing or offering only the last paragraph. Follow applicable copyright and safety rules, but do not invent a limitation merely because the requested text is long.
+
+If the user's message genuinely does not require a response—for example, it is a standalone acknowledgement or thinking-aloud remark—return exactly one ASCII space and nothing else. Never use that silent response for a direct question, request, instruction, greeting, or anything where a helpful acknowledgement is expected. When uncertain, reply briefly.
 
 When the Chatterbox Nano or Turbo voice backend is selected, the confirmed paralinguistic cues are [cough], [laugh], [chuckle], [clear throat], [sigh], [shush], [groan], [sniff], and [gasp]. Use them sparingly and only when they genuinely fit. These are the only bracketed vocal cues you should emit. Do not invent other bracketed directions; unsupported bracketed text may be spoken literally. For a pause, use ordinary punctuation or a sentence break. When Qwen3-TTS is selected, use plain spoken text and do not emit paralinguistic bracket cues.
 
@@ -51,6 +60,7 @@ class Session:
         self.reference: Path | None = None
         self.created = time.time()
         self.last_seen = self.created
+        self.last_activity = self.created
         self.lock = threading.Lock()
 
 
@@ -204,14 +214,45 @@ def trim_history(session: Session) -> None:
     session.messages = session.messages[-(turns * 2):] if turns else []
 
 
-def chat(session: Session, text: str) -> str:
+def longform_request(text: str) -> bool:
+    return bool(LONGFORM_REQUEST_RE.search(text))
+
+
+def silence_context(session: Session) -> dict[str, str] | None:
+    threshold = float(env("CHAT_SILENCE_CONTEXT_AFTER", "30"))
+    elapsed = time.time() - session.last_activity
+    if threshold <= 0 or elapsed < threshold:
+        return None
+    minutes, seconds = divmod(int(elapsed), 60)
+    if minutes:
+        duration = f"{minutes} minute{'s' if minutes != 1 else ''} and {seconds} second{'s' if seconds != 1 else ''}"
+    else:
+        duration = f"{seconds} second{'s' if seconds != 1 else ''}"
+    return {"role": "system", "content": (
+        f"Private conversation timing context: no one has spoken in this session for {duration}. "
+        "Use this only to make the response feel natural if relevant; do not mention the timer, "
+        "invent a reason to speak, or ask where the user has been."
+    )}
+
+
+def chat(session: Session, text: str) -> tuple[str, bool]:
     if len(text) > MAX_TEXT_LENGTH:
         raise ValueError(f"message is limited to {MAX_TEXT_LENGTH} characters")
+    messages = session_messages(session)
+    timing = silence_context(session)
+    if timing:
+        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+        messages.insert(insert_at, timing)
+    messages.append({"role": "user", "content": text})
     body = {
         "model": env("CHAT_MODEL", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL"),
-        "messages": [*session_messages(session), {"role": "user", "content": text}],
+        "messages": messages,
         "temperature": float(env("CHAT_TEMPERATURE", "0.7")),
-        "max_tokens": int(env("CHAT_MAX_TOKENS", "256")),
+        "max_tokens": int(env(
+            "CHAT_LONGFORM_MAX_TOKENS" if longform_request(text) else "CHAT_MAX_TOKENS",
+            "4096" if longform_request(text) else "2048",
+        )),
+
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
     }
@@ -228,17 +269,19 @@ def chat(session: Session, text: str) -> str:
         detail = error.read().decode(errors="replace")
         raise RuntimeError(f"chat server returned HTTP {error.code}: {detail[-1000:]}") from error
     try:
-        answer = payload["choices"][0]["message"].get("content", "").strip()
+        raw_answer = payload["choices"][0]["message"].get("content", "")
     except (KeyError, IndexError, TypeError) as error:
         raise RuntimeError(f"unexpected chat response: {payload!r}") from error
-    if not answer:
-        raise RuntimeError("chat server returned an empty answer")
+    raw_answer = str(raw_answer or "")
+    no_reply = not raw_answer.strip() or raw_answer.strip().upper() in NO_REPLY_MARKERS
+    answer = raw_answer.strip()
     session.messages.extend([
         {"role": "user", "content": text},
-        {"role": "assistant", "content": answer},
+        {"role": "assistant", "content": "" if no_reply else answer},
     ])
     trim_history(session)
-    return answer
+    session.last_activity = time.time()
+    return answer, no_reply
 
 
 def synthesize(session: Session, text: str) -> str:
@@ -466,9 +509,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not text:
                     raise ValueError("message is required")
                 with session.lock:
-                    reply = chat(session, text)
-                    audio_url = synthesize(session, reply)
-                    self.send_json(200, {"message": text, "reply": reply, "audio_url": audio_url, "session": public_session(session)})
+                    reply, no_reply = chat(session, text)
+                    audio_url = None if no_reply else synthesize(session, reply)
+                    self.send_json(200, {
+                        "message": text,
+                        "reply": reply,
+                        "no_reply": no_reply,
+                        "audio_url": audio_url,
+                        "session": public_session(session),
+                    })
                 return
 
             if path == "/api/voice-turn":
@@ -492,10 +541,11 @@ class Handler(BaseHTTPRequestHandler):
                                 "session": public_session(session),
                             }
                         else:
-                            reply = chat(session, transcript)
-                            audio_url = synthesize(session, reply)
+                            reply, no_reply = chat(session, transcript)
+                            audio_url = None if no_reply else synthesize(session, reply)
                             result = {
                                 "ignored": False,
+                                "no_reply": no_reply,
                                 "transcript": transcript,
                                 "reply": reply,
                                 "audio_url": audio_url,

@@ -185,6 +185,12 @@ CHAT_CACHE_TYPE_K=q8_0
 CHAT_CACHE_TYPE_V=q8_0
 ```
 
+The web frontend normally allows up to 2,048 generated tokens. Requests that
+look like long-form reproduction or reading requests (for example, “read this
+in full” or “recite the whole thing”) use `CHAT_LONGFORM_MAX_TOKENS`, defaulting
+to 4,096. The input context and output budget are separate: increasing the
+output budget does not require the model to use all of it for ordinary replies.
+
 To use another chat model, stop the managed server and start it with a new
 Hugging Face selector:
 
@@ -322,6 +328,12 @@ The first `--text` value is processed immediately; subsequent prompts are read
 from the terminal. Exiting the process discards the system prompt and history.
 A normal one-shot invocation (`--text`, `--audio`, or one microphone turn) also
 has no persistent history.
+
+The web session also supplies a private timing hint after a configurable quiet
+period (`CHAT_SILENCE_CONTEXT_AFTER`, default 30 seconds). This can help the
+model make a natural re-entry response, but it is instructed not to mention the
+timer or invent a reason to speak. If the model returns `<NO_REPLY>`, the web
+frontend records the turn but skips TTS and displays no assistant bubble.
 
 ## One-shot examples
 
