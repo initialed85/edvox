@@ -29,8 +29,8 @@ Press Enter in the message box to send; use Shift+Enter for a multiline message.
 The browser also has an opt-in **Enable VOX** mode. After microphone permission
 is granted, the browser analyzes the microphone signal locally and uploads only
 completed speech segments. It adapts to the local noise floor, keeps a short
-pre-roll, ends an utterance after sustained silence, and caps a single utterance
-at 30 seconds. Empty, silence-only, and short filler-only Whisper transcripts
+pre-roll, waits through a short conversational backoff before applying about
+1.4 seconds of sustained silence, and caps a single utterance at 30 seconds. Empty, silence-only, and short filler-only Whisper transcripts
 are discarded by the web server before the chat model or TTS is called.
 
 VOX is intentionally half-duplex for now: it pauses listening while the

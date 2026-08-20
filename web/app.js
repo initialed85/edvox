@@ -1,7 +1,10 @@
 const VOX_CONFIG = {
   calibrationMs: 800,
   minSpeechMs: 300,
-  silenceMs: 800,
+  // A conversational pause is not necessarily the end of an utterance. Keep
+  // listening through ordinary pauses, then give Whisper a final quiet tail.
+  silenceMs: 1400,
+  backoffMs: 700,
   maxUtteranceMs: 30000,
   startFloor: 0.012,
   minStartRms: 0.025,
@@ -33,6 +36,7 @@ const state = {
   voxChunks: [],
   voxCandidateSince: 0,
   voxLastSpeechAt: 0,
+  voxBackoffUntil: 0,
   voxSubmit: false,
 };
 
@@ -310,6 +314,7 @@ function startVoxRecorder(now) {
     state.voxRecorder = recorder;
     state.voxCandidateSince = now;
     state.voxLastSpeechAt = now;
+    state.voxBackoffUntil = now + VOX_CONFIG.backoffMs;
     state.voxSubmit = false;
     recorder.ondataavailable = (event) => event.data.size && state.voxChunks.push(event.data);
     recorder.onerror = () => {
@@ -325,6 +330,7 @@ function startVoxRecorder(now) {
       state.voxSubmit = false;
       state.voxCandidateSince = 0;
       state.voxLastSpeechAt = 0;
+      state.voxBackoffUntil = 0;
       if (submit && blob.size && state.voxEnabled) {
         setVoxPhase('processing');
         handleAudio(blob, {vox: true});
@@ -370,7 +376,10 @@ function voxTick(now) {
   } else if (state.voxPhase === 'recording' && !state.busy) {
     if (rms > thresholds.speech) {
       state.voxLastSpeechAt = now;
-    } else if (now - state.voxLastSpeechAt >= VOX_CONFIG.silenceMs) {
+    } else if (
+      now >= state.voxBackoffUntil &&
+      now - state.voxLastSpeechAt >= VOX_CONFIG.silenceMs
+    ) {
       const longEnough = now - state.voxCandidateSince >= VOX_CONFIG.minSpeechMs;
       stopVoxRecorder(longEnough);
     } else if (now - state.voxCandidateSince >= VOX_CONFIG.maxUtteranceMs) {
@@ -422,6 +431,7 @@ async function enableVox() {
 function disableVox() {
   state.voxEnabled = false;
   state.voxSubmit = false;
+  state.voxBackoffUntil = 0;
   if (state.voxAnimationFrame) cancelAnimationFrame(state.voxAnimationFrame);
   state.voxAnimationFrame = null;
   if (state.voxRecorder?.state === 'recording') state.voxRecorder.stop();
