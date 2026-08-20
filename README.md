@@ -19,7 +19,11 @@ unless explicitly enabled. The settings panel also has `Record my voice`, which
 records a browser microphone clip and installs it as the session's clone voice.
 Press Enter in the message box to send; use Shift+Enter for a multiline message.
 New sessions start with a voice-oriented system prompt that can be edited or
-replaced in the session settings.
+replaced in the session settings. Chatterbox Nano and Turbo officially document
+these paralinguistic tags: `[cough]`, `[laugh]`, `[chuckle]`, `[clear throat]`,
+`[sigh]`, `[shush]`, `[groan]`, `[sniff]`, and `[gasp]`. Do not use arbitrary
+bracketed directions such as `[slight pause]`; unsupported text may be spoken
+literally. Use ordinary punctuation for pauses.
 
 Start the frontend and its resident services:
 
