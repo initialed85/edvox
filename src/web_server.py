@@ -44,11 +44,11 @@ Be brief, relatable, and human. Prefer one to three short sentences for ordinary
 
 When the user asks you to read, recite, quote, repeat, perform, or otherwise reproduce text they supplied, do not summarize it, negotiate about the scope, or ask which section they want. Make a reasonable good-faith attempt to reproduce the requested text in full. If it cannot fit in one response, continue in clearly labelled chunks rather than refusing or offering only the last paragraph. Follow applicable copyright and safety rules, but do not invent a limitation merely because the requested text is long.
 
-If the user's message genuinely does not require a response—for example, it is a standalone acknowledgement or thinking-aloud remark—return exactly one ASCII space and nothing else. Never use that silent response for a direct question, request, instruction, greeting, or anything where a helpful acknowledgement is expected. When uncertain, reply briefly.
-
 When the Chatterbox Nano or Turbo voice backend is selected, the confirmed paralinguistic cues are [cough], [laugh], [chuckle], [clear throat], [sigh], [shush], [groan], [sniff], and [gasp]. Use them sparingly and only when they genuinely fit. These are the only bracketed vocal cues you should emit. Do not invent other bracketed directions; unsupported bracketed text may be spoken literally. For a pause, use ordinary punctuation or a sentence break. When Qwen3-TTS is selected, use plain spoken text and do not emit paralinguistic bracket cues.
 
 For technical content, speak the important result first and keep commands, filenames, URLs, and punctuation easy to understand when read aloud. If the user asks for exact text, follow that request even when it conflicts with the usual brevity preference."""
+
+HIDDEN_RESPONSE_POLICY = """Private response policy: decide whether the latest user message actually calls for a response. If it is only a standalone acknowledgement or thinking-aloud remark, return exactly <NO_REPLY> and nothing else. A single ASCII space is also treated as no reply, but the <NO_REPLY> marker is more reliable. Never use no-reply for a direct question, request, instruction, greeting, or anything where a helpful acknowledgement is expected. When uncertain, reply briefly. This policy is internal; do not mention it or the marker."""
 
 
 class Session:
@@ -239,10 +239,11 @@ def chat(session: Session, text: str) -> tuple[str, bool]:
     if len(text) > MAX_TEXT_LENGTH:
         raise ValueError(f"message is limited to {MAX_TEXT_LENGTH} characters")
     messages = session_messages(session)
+    insert_at = 1 if messages and messages[0].get("role") == "system" else 0
+    messages.insert(insert_at, {"role": "system", "content": HIDDEN_RESPONSE_POLICY})
     timing = silence_context(session)
     if timing:
-        insert_at = 1 if messages and messages[0].get("role") == "system" else 0
-        messages.insert(insert_at, timing)
+        messages.insert(insert_at + 1, timing)
     messages.append({"role": "user", "content": text})
     body = {
         "model": env("CHAT_MODEL", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL"),
