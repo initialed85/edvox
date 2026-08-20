@@ -218,11 +218,37 @@ function recorderOptions() {
     ? {mimeType: 'audio/webm;codecs=opus'} : {};
 }
 
+function microphoneError(error) {
+  if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
+    if (window.isSecureContext === false) {
+      return new Error('Microphone access requires HTTPS when connecting from another device. Open the Caddy HTTPS URL, or use localhost.');
+    }
+    return new Error('Microphone permission was denied. Check this site’s browser permission and try again.');
+  }
+  if (error?.name === 'NotFoundError') return new Error('No microphone was found on this device.');
+  if (error?.name === 'NotReadableError') return new Error('The microphone is busy or unavailable.');
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return new Error('Microphone access requires HTTPS when connecting from another device. Open the Caddy HTTPS URL, or use localhost.');
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+async function getMicrophone(constraints) {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    throw microphoneError();
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (error) {
+    throw microphoneError(error);
+  }
+}
+
 async function startRecording({clone = false} = {}) {
   if (state.busy || state.mediaRecorder || state.voxEnabled) return;
   state.cloneRecording = clone;
   try {
-    state.recordingStream = await navigator.mediaDevices.getUserMedia({audio: true});
+    state.recordingStream = await getMicrophone({audio: true});
     state.recordingChunks = [];
     state.mediaRecorder = new MediaRecorder(state.recordingStream, recorderOptions());
     state.mediaRecorder.ondataavailable = (event) => event.data.size && state.recordingChunks.push(event.data);
@@ -393,10 +419,9 @@ async function enableVox() {
   if (state.busy || state.voxEnabled) return;
   setBusy(true, 'Requesting microphone permission…');
   try {
-    if (!navigator.mediaDevices?.getUserMedia) throw new Error('this browser does not support microphone capture');
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     if (!AudioContextClass) throw new Error('this browser does not support local audio analysis');
-    state.voxStream = await navigator.mediaDevices.getUserMedia({
+    state.voxStream = await getMicrophone({
       audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true},
     });
     state.voxContext = new AudioContextClass();

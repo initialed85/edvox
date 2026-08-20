@@ -3,6 +3,7 @@ voices/*
 audio/*
 logs/*
 !.gitkeep
+config/Caddyfile.local
 .env
 .venv/
 __pycache__/

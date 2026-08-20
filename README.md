@@ -58,6 +58,61 @@ Then open <http://127.0.0.1:8200>. For a local-only binding, set `WEB_HOST=127.0
 frontend from another machine, open `http://192.168.137.111:8200` or use an SSH
 tunnel:
 
+### Local HTTPS with Caddy
+
+Phone browsers require a secure origin for microphone access. The workspace
+includes a small Caddy reverse proxy using a locally trusted development CA:
+
+```bash
+./scripts/start-caddy-background.sh
+./scripts/status-caddy.sh
+```
+
+Then use:
+
+```text
+https://icarus.local:8443
+```
+
+Caddy listens on port `8443` by default so it does not need privileged port
+access. It proxies to the Python web server on `127.0.0.1:8200`; the Caddy
+proxy and backend services are not otherwise changed. `tls internal` means the
+certificate is self-signed by Caddy's local CA. For a phone to accept it
+without a warning, install and trust Caddy's root certificate on that phone.
+
+Find the certificate with:
+
+```bash
+./scripts/caddy-root-cert.sh
+```
+
+On iOS, install the downloaded `.crt` profile, then enable full trust under
+Settings → General → About → Certificate Trust Settings. Android has a similar
+certificate installation flow, although browser trust behavior varies by
+version. Until the CA is trusted, `curl -k` and a browser warning can confirm
+that the proxy itself is working, but microphone access may still be blocked.
+
+The hostname defaults to `icarus.local`. Override it when starting Caddy if
+needed:
+
+```bash
+CADDY_DOMAIN=192.168.137.111 ./scripts/start-caddy-background.sh
+```
+
+For a phone, `icarus.local` is preferable because the local certificate is
+issued for that hostname and mDNS normally resolves it on the LAN. If the
+phone cannot resolve `icarus.local`, add a local DNS/hosts entry or use an IP
+site only after generating a certificate that includes that IP. Stop the
+development proxy with `./scripts/stop-caddy.sh`.
+
+The HTTPS frontend gives a clear error if microphone capture is attempted over
+plain HTTP from another device. The HTTP endpoint remains available for
+localhost/testing.
+
+To access the LAN-bound
+frontend from another machine, open `http://192.168.137.111:8200` or use an SSH
+tunnel:
+
 ```bash
 ssh -N -L 8200:127.0.0.1:8200 edwardbeech@192.168.137.111
 ```
