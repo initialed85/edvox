@@ -38,7 +38,8 @@
             <span id="voice-status" class="muted">No reference uploaded</span>
           </div>
           <input id="voice-file" type="file" accept="audio/*">
-          <p class="hint">Use an audio clip longer than five seconds. It is kept for this browser session and cached by the resident TTS service after first use.</p>
+          <p class="hint">Upload a clip longer than five seconds, or record yourself below. Your reference is kept for this browser session.</p>
+          <button id="clone-voice-button" class="clone-button" type="button">Record my voice</button>
           <button id="clear-voice" class="quiet-button" type="button" hidden>Clear voice</button>
         </div>
       </div>
@@ -61,7 +62,8 @@
             <button id="send-button" class="send-button" type="submit">Send <span>↗</span></button>
           </div>
         </form>
-        <p class="keyboard-note">You can also hold <kbd>Space</kbd> while this page is focused.</p>
+        <label class="keyboard-toggle"><input id="space-ptt" type="checkbox"> Enable Spacebar PTT</label>
+        <p id="keyboard-note" class="keyboard-note">Spacebar is navigation only; use the PTT button to talk.</p>
       </div>
     </section>
 

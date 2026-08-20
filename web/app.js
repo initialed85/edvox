@@ -4,6 +4,8 @@ const state = {
   recordingStream: null,
   busy: false,
   pressed: false,
+  spacePttEnabled: true,
+  cloneRecording: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -12,6 +14,7 @@ function setBusy(busy, activity = '') {
   state.busy = busy;
   $('send-button').disabled = busy;
   $('ptt-button').disabled = busy;
+  $('clone-voice-button').disabled = busy;
   $('save-settings').disabled = busy;
   $('activity').hidden = !activity;
   $('activity').textContent = activity;
@@ -65,6 +68,9 @@ function renderSession(session) {
     $('clear-voice').hidden = true;
   }
   $('messages').querySelectorAll('.message').forEach((node) => node.remove());
+  if (!(session.messages || []).length) {
+    $('messages').insertAdjacentHTML('afterbegin', '<div id="empty-state" class="empty-state"><div class="orb">◉</div><h2>Ready when you are.</h2><p>Send a text message or hold the PTT button to speak.</p></div>');
+  }
   (session.messages || []).forEach((message, index) => {
     if (message.role === 'user') {
       const answer = session.messages[index + 1];
@@ -136,8 +142,9 @@ async function handleAudio(blob) {
   finally { setBusy(false); }
 }
 
-async function startRecording() {
+async function startRecording({clone = false} = {}) {
   if (state.busy || state.mediaRecorder) return;
+  state.cloneRecording = clone;
   try {
     state.recordingStream = await navigator.mediaDevices.getUserMedia({audio: true});
     state.recordingChunks = [];
@@ -150,16 +157,29 @@ async function startRecording() {
       state.recordingStream = null;
       state.mediaRecorder = null;
       $('ptt-button').classList.remove('recording');
+      $('clone-voice-button').classList.remove('recording');
       $('ptt-button').querySelector('span:last-child').textContent = 'Hold to talk';
-      if (blob.size) handleAudio(blob);
+      $('clone-voice-button').textContent = 'Record my voice';
+      const wasCloneRecording = state.cloneRecording;
+      if (blob.size) {
+        if (wasCloneRecording) uploadVoice(new File([blob], 'my-voice.webm', {type: blob.type}));
+        else handleAudio(blob);
+      }
+      state.cloneRecording = false;
     };
     state.mediaRecorder.start();
-    $('ptt-button').classList.add('recording');
-    $('ptt-button').querySelector('span:last-child').textContent = 'Release to send';
+    if (clone) {
+      $('clone-voice-button').classList.add('recording');
+      $('clone-voice-button').textContent = 'Release to save voice';
+    } else {
+      $('ptt-button').classList.add('recording');
+      $('ptt-button').querySelector('span:last-child').textContent = 'Release to send';
+    }
   } catch (error) {
     showError(error);
     state.recordingStream?.getTracks().forEach((track) => track.stop());
     state.recordingStream = null;
+    state.cloneRecording = false;
   }
 }
 
@@ -187,17 +207,41 @@ ptt.addEventListener('pointerdown', (event) => { event.preventDefault(); state.p
 ptt.addEventListener('pointerup', (event) => { event.preventDefault(); state.pressed = false; stopRecording(); });
 ptt.addEventListener('pointercancel', () => { state.pressed = false; stopRecording(); });
 ptt.addEventListener('pointerleave', (event) => { if (state.pressed && event.buttons === 0) { state.pressed = false; stopRecording(); } });
+
+const cloneButton = $('clone-voice-button');
+cloneButton.addEventListener('pointerdown', (event) => { event.preventDefault(); state.pressed = true; startRecording({clone: true}); });
+cloneButton.addEventListener('pointerup', (event) => { event.preventDefault(); state.pressed = false; stopRecording(); });
+cloneButton.addEventListener('pointercancel', () => { state.pressed = false; stopRecording(); });
+cloneButton.addEventListener('pointerleave', (event) => { if (state.pressed && event.buttons === 0) { state.pressed = false; stopRecording(); } });
+
+function shouldHandleSpace(event) {
+  const target = event.target;
+  const isFormControl = target instanceof Element && target.closest('textarea, input, select, button');
+  return event.code === 'Space' && !event.repeat && !state.busy && !isFormControl && state.spacePttEnabled;
+}
 window.addEventListener('keydown', (event) => {
-  if (event.code !== 'Space' || event.repeat || state.busy || event.target.matches('textarea, input, select, button')) return;
+  if (!shouldHandleSpace(event)) return;
   event.preventDefault();
   state.pressed = true;
   startRecording();
 });
 window.addEventListener('keyup', (event) => {
-  if (event.code !== 'Space' || !state.pressed) return;
+  if (event.code !== 'Space' || !state.pressed || !state.spacePttEnabled) return;
   event.preventDefault();
   state.pressed = false;
   stopRecording();
+});
+$('space-ptt').checked = state.spacePttEnabled;
+$('space-ptt').addEventListener('change', (event) => {
+  state.spacePttEnabled = event.target.checked;
+  event.target.blur();
+  $('keyboard-note').textContent = state.spacePttEnabled ? 'Spacebar PTT is enabled while this page is focused.' : 'Spacebar is navigation only; use the PTT button to talk.';
+});
+window.addEventListener('blur', () => {
+  if (state.pressed) {
+    state.pressed = false;
+    stopRecording();
+  }
 });
 
 loadSession().catch(showError);
