@@ -133,7 +133,7 @@ def run_checked(command: list[str], timeout: float) -> subprocess.CompletedProce
 
 def convert_audio(data: bytes, suffix: str, destination: Path) -> float:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    source = destination.with_suffix(suffix or ".audio")
+    source = destination.parent / f".{destination.stem}.upload-{uuid.uuid4().hex}{suffix or '.audio'}"
     source.write_bytes(data)
     try:
         run_checked([
