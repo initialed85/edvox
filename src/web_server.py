@@ -49,6 +49,7 @@ When the Chatterbox Nano or Turbo voice backend is selected, the confirmed paral
 For technical content, speak the important result first and keep commands, filenames, URLs, and punctuation easy to understand when read aloud. If the user asks for exact text, follow that request even when it conflicts with the usual brevity preference."""
 
 HIDDEN_RESPONSE_POLICY = """Private response policy: decide whether the latest user message actually calls for a response. If it is only a standalone acknowledgement or thinking-aloud remark, return exactly <NO_REPLY> and nothing else. A single ASCII space is also treated as no reply, but the <NO_REPLY> marker is more reliable. Never use no-reply for a direct question, request, instruction, greeting, or anything where a helpful acknowledgement is expected. When uncertain, reply briefly. This policy is internal; do not mention it or the marker."""
+AUTONOMOUS_RESPONSE_POLICY = """Private autonomous-turn policy: this is an opportunity to speak, not a request to speak. The user has been quiet. Return exactly <NO_REPLY> unless you have a genuinely useful, contextually grounded reason to say something now. Most autonomous checks should be <NO_REPLY>. Never ask whether the user is still there, announce that you are checking in, mention silence or a timer, repeat a previous offer, summarize the conversation without a reason, or generate generic small talk. Do not start a monologue. If you do speak, use at most one brief, natural sentence and only say something relevant to the recent conversation. This policy is internal; do not mention it or the marker."""
 
 
 class Session:
@@ -61,6 +62,7 @@ class Session:
         self.created = time.time()
         self.last_seen = self.created
         self.last_activity = self.created
+        self.last_autonomous_at = 0.0
         self.lock = threading.Lock()
 
 
@@ -219,7 +221,7 @@ def longform_request(text: str) -> bool:
 
 
 def silence_context(session: Session) -> dict[str, str] | None:
-    threshold = float(env("CHAT_SILENCE_CONTEXT_AFTER", "30"))
+    threshold = float(env("CHAT_SILENCE_CONTEXT_AFTER", "10"))
     elapsed = time.time() - session.last_activity
     if threshold <= 0 or elapsed < threshold:
         return None
@@ -235,24 +237,33 @@ def silence_context(session: Session) -> dict[str, str] | None:
     )}
 
 
-def chat(session: Session, text: str) -> tuple[str, bool]:
+def chat(session: Session, text: str, *, autonomous: bool = False) -> tuple[str, bool]:
     if len(text) > MAX_TEXT_LENGTH:
         raise ValueError(f"message is limited to {MAX_TEXT_LENGTH} characters")
     messages = session_messages(session)
     insert_at = 1 if messages and messages[0].get("role") == "system" else 0
     messages.insert(insert_at, {"role": "system", "content": HIDDEN_RESPONSE_POLICY})
+    if autonomous:
+        messages.insert(insert_at + 1, {"role": "system", "content": AUTONOMOUS_RESPONSE_POLICY})
     timing = silence_context(session)
     if timing:
-        messages.insert(insert_at + 1, timing)
-    messages.append({"role": "user", "content": text})
+        messages.insert(insert_at + (2 if autonomous else 1), timing)
+    prompt = (
+        "Private event: the user has been quiet. Decide whether a brief, genuinely useful "
+        "proactive remark is warranted. Return <NO_REPLY> if not."
+        if autonomous else text
+    )
+    messages.append({"role": "user", "content": prompt})
     body = {
         "model": env("CHAT_MODEL", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL"),
         "messages": messages,
         "temperature": float(env("CHAT_TEMPERATURE", "0.7")),
-        "max_tokens": int(env(
-            "CHAT_LONGFORM_MAX_TOKENS" if longform_request(text) else "CHAT_MAX_TOKENS",
-            "4096" if longform_request(text) else "2048",
-        )),
+        "max_tokens": int(
+            env("CHAT_AUTONOMOUS_MAX_TOKENS", "128") if autonomous else env(
+                "CHAT_LONGFORM_MAX_TOKENS" if longform_request(text) else "CHAT_MAX_TOKENS",
+                "4096" if longform_request(text) else "2048",
+            )
+        ),
 
         "stream": False,
         "chat_template_kwargs": {"enable_thinking": False},
@@ -276,12 +287,17 @@ def chat(session: Session, text: str) -> tuple[str, bool]:
     raw_answer = str(raw_answer or "")
     no_reply = not raw_answer.strip() or raw_answer.strip().upper() in NO_REPLY_MARKERS
     answer = raw_answer.strip()
-    session.messages.extend([
-        {"role": "user", "content": text},
-        {"role": "assistant", "content": "" if no_reply else answer},
-    ])
+    if autonomous:
+        if not no_reply:
+            session.messages.append({"role": "assistant", "content": answer})
+    else:
+        session.messages.extend([
+            {"role": "user", "content": text},
+            {"role": "assistant", "content": "" if no_reply else answer},
+        ])
+        session.last_activity = time.time()
+        session.last_autonomous_at = 0.0
     trim_history(session)
-    session.last_activity = time.time()
     return answer, no_reply
 
 
@@ -360,6 +376,7 @@ def public_session(session: Session) -> dict[str, object]:
         "system_prompt": session.system_prompt,
         "reference": session.reference.name if session.reference else None,
         "messages": session.messages,
+        "autonomous_after_seconds": max(0.0, float(env("CHAT_SILENCE_CONTEXT_AFTER", "10"))),
     }
 
 
@@ -502,6 +519,42 @@ class Handler(BaseHTTPRequestHandler):
                         session.reference.unlink(missing_ok=True)
                     session.reference = None
                 self.send_json(200, public_session(session))
+                return
+
+            if path == "/api/autonomous-turn":
+                with session.lock:
+                    threshold = float(env("CHAT_SILENCE_CONTEXT_AFTER", "10"))
+                    elapsed = time.time() - session.last_activity
+                    has_user_turn = any(message.get("role") == "user" for message in session.messages)
+                    eligible = (
+                        threshold > 0
+                        and elapsed >= threshold
+                        and has_user_turn
+                        and session.last_autonomous_at <= session.last_activity
+                    )
+                    if not eligible:
+                        self.send_json(200, {
+                            "skipped": True,
+                            "retry": bool(threshold > 0 and elapsed < threshold and has_user_turn),
+                            "reason": "quiet-period-not-reached-or-already-checked",
+                            "session": public_session(session),
+                        })
+                        return
+                    session.last_autonomous_at = time.time()
+                    try:
+                        reply, no_reply = chat(session, "", autonomous=True)
+                        audio_url = None if no_reply else synthesize(session, reply)
+                    except Exception:
+                        session.last_autonomous_at = 0.0
+                        raise
+                    self.send_json(200, {
+                        "skipped": False,
+                        "autonomous": True,
+                        "reply": reply,
+                        "no_reply": no_reply,
+                        "audio_url": audio_url,
+                        "session": public_session(session),
+                    })
                 return
 
             if path == "/api/chat":

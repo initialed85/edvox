@@ -38,6 +38,16 @@ VOX is intentionally half-duplex for now: it pauses listening while the
 assistant's audio reply plays, then arms itself again. Disable VOX to return to
 button PTT or ordinary text chat.
 
+The session also has an opt-in **Enable autonomous check-ins** switch. When it
+is enabled, the browser waits until the configured quiet period has elapsed,
+then makes one small model request asking whether there is a genuinely useful,
+contextually grounded reason to speak. Most checks should return `<NO_REPLY>`;
+the model is capped at a short response and is told not to ask whether you are
+still there, mention the timer, or start a monologue. Any real user message
+resets the quiet-period timer. The switch is enabled by default for this experiment, and it pauses while
+VOX is listening or while another request is active. Turn it off if the
+assistant becomes too chatty.
+
 New sessions start with a voice-oriented system prompt that can be edited or
 replaced in the session settings. Chatterbox Nano and Turbo officially document
 these paralinguistic tags: `[cough]`, `[laugh]`, `[chuckle]`, `[clear throat]`,
@@ -385,10 +395,11 @@ A normal one-shot invocation (`--text`, `--audio`, or one microphone turn) also
 has no persistent history.
 
 The web session also supplies a private timing hint after a configurable quiet
-period (`CHAT_SILENCE_CONTEXT_AFTER`, default 30 seconds). This can help the
+period (`CHAT_SILENCE_CONTEXT_AFTER`, default 10 seconds). This can help the
 model make a natural re-entry response, but it is instructed not to mention the
-timer or invent a reason to speak. If the model returns `<NO_REPLY>`, the web
-frontend records the turn but skips TTS and displays no assistant bubble.
+timer or invent a reason to speak. The browser's autonomous check-in switch
+uses the same interval. If the model returns `<NO_REPLY>`, the web frontend
+records the turn but skips TTS and displays no assistant bubble.
 
 ## One-shot examples
 

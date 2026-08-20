@@ -38,6 +38,12 @@ const state = {
   voxLastSpeechAt: 0,
   voxBackoffUntil: 0,
   voxSubmit: false,
+  autonomousEnabled: true,
+  autonomousAfterSeconds: 10,
+  autonomousTimer: null,
+  autonomousInFlight: false,
+  autonomousBlocked: false,
+  hasUserTurn: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -58,6 +64,41 @@ function setBusy(busy, activity = '') {
   refreshControls();
   $('activity').hidden = !activity;
   $('activity').textContent = activity;
+}
+
+function scheduleAutonomousCheck() {
+  if (state.autonomousTimer) clearTimeout(state.autonomousTimer);
+  state.autonomousTimer = null;
+  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || state.voxEnabled) return;
+  state.autonomousTimer = setTimeout(runAutonomousCheck, Math.max(1, state.autonomousAfterSeconds) * 1000);
+}
+
+async function runAutonomousCheck() {
+  state.autonomousTimer = null;
+  if (!state.autonomousEnabled || state.autonomousBlocked || !state.hasUserTurn || state.busy || state.voxEnabled || state.autonomousInFlight) return;
+  if ([...document.querySelectorAll('audio')].some((audio) => !audio.paused && !audio.ended)) {
+    scheduleAutonomousCheck();
+    return;
+  }
+  state.autonomousInFlight = true;
+  setBusy(true, 'Checking in…');
+  try {
+    const result = await request('/api/autonomous-turn', {method: 'POST'});
+    if (result.skipped && !result.retry) {
+      state.autonomousBlocked = true;
+      return;
+    }
+    if (!result.skipped) {
+      state.autonomousBlocked = true;
+      if (!result.no_reply && result.reply) addMessage('assistant', result.reply, result.audio_url);
+    }
+  } catch (error) {
+    showError(error);
+  } finally {
+    state.autonomousInFlight = false;
+    setBusy(false);
+    scheduleAutonomousCheck();
+  }
 }
 
 function showError(error) {
@@ -102,6 +143,9 @@ function addMessage(role, text, audioUrl = '') {
 function renderSession(session) {
   $('backend').value = session.backend || 'chatterbox';
   $('system-prompt').value = session.system_prompt || '';
+  state.autonomousAfterSeconds = Number(session.autonomous_after_seconds || 10);
+  state.hasUserTurn = (session.messages || []).some((message) => message.role === 'user');
+  state.autonomousBlocked = false;
   if (session.reference) {
     $('voice-status').textContent = session.reference;
     $('clear-voice').hidden = false;
@@ -113,12 +157,9 @@ function renderSession(session) {
   if (!(session.messages || []).length) {
     $('messages').insertAdjacentHTML('afterbegin', '<div id="empty-state" class="empty-state"><div class="orb">◉</div><h2>Ready when you are.</h2><p>Enable VOX, send a text message, or hold the PTT button to speak.</p></div>');
   }
-  (session.messages || []).forEach((message, index) => {
-    if (message.role === 'user') {
-      const answer = session.messages[index + 1];
-      addMessage('user', message.content);
-      if (answer?.role === 'assistant' && answer.content?.trim()) addMessage('assistant', answer.content);
-    }
+  (session.messages || []).forEach((message) => {
+    if (message.role === 'user' && message.content?.trim()) addMessage('user', message.content);
+    if (message.role === 'assistant' && message.content?.trim()) addMessage('assistant', message.content);
   });
 }
 
@@ -140,12 +181,14 @@ async function saveSettings() {
       body: JSON.stringify({backend: $('backend').value, system_prompt: $('system-prompt').value}),
     });
     renderSession(session);
-  } finally { setBusy(false); }
+  } finally { setBusy(false); scheduleAutonomousCheck(); }
 }
 
 async function sendText(text) {
   if (!text.trim() || state.busy) return;
   $('message').value = '';
+  state.hasUserTurn = true;
+  state.autonomousBlocked = false;
   addMessage('user', text.trim());
   setBusy(true, 'Thinking and synthesizing…');
   try {
@@ -156,7 +199,7 @@ async function sendText(text) {
     if (!result.no_reply) addMessage('assistant', result.reply, result.audio_url);
   } catch (error) {
     showError(error);
-  } finally { setBusy(false); }
+  } finally { setBusy(false); scheduleAutonomousCheck(); }
 }
 
 async function uploadVoice(file) {
@@ -169,7 +212,7 @@ async function uploadVoice(file) {
     $('voice-status').textContent = `${result.reference} (${result.duration_seconds}s)`;
     $('clear-voice').hidden = false;
   } catch (error) { showError(error); }
-  finally { setBusy(false); }
+  finally { setBusy(false); scheduleAutonomousCheck(); }
 }
 
 async function waitForPlayback(audio) {
@@ -199,6 +242,8 @@ async function handleAudio(blob, {vox = false} = {}) {
     form.append('audio', blob, 'microphone.webm');
     const result = await request('/api/voice-turn', {method: 'POST', body: form});
     if (result.ignored) return;
+    state.hasUserTurn = true;
+    state.autonomousBlocked = false;
     addMessage('user', result.transcript);
     const audio = result.no_reply ? null : addMessage('assistant', result.reply, result.audio_url);
     if (vox) {
@@ -210,6 +255,7 @@ async function handleAudio(blob, {vox = false} = {}) {
   finally {
     setBusy(false);
     if (vox && state.voxEnabled) setVoxPhase('armed');
+    scheduleAutonomousCheck();
   }
 }
 
@@ -471,6 +517,7 @@ function disableVox() {
   state.voxPhase = 'off';
   setVoxPhase('off');
   refreshControls();
+  scheduleAutonomousCheck();
 }
 
 $('chat-form').addEventListener('submit', (event) => {
@@ -528,6 +575,15 @@ window.addEventListener('keyup', (event) => {
   stopRecording();
 });
 $('space-ptt').checked = state.spacePttEnabled;
+$('autonomous-toggle').checked = state.autonomousEnabled;
+$('autonomous-note').textContent = `Enabled. The model may speak after ${state.autonomousAfterSeconds} seconds of silence.`;
+$('autonomous-toggle').addEventListener('change', (event) => {
+  state.autonomousEnabled = event.target.checked;
+  $('autonomous-note').textContent = state.autonomousEnabled
+    ? `Enabled. The model may speak after ${state.autonomousAfterSeconds} seconds of silence.`
+    : 'Off. The model will only respond after you speak.';
+  scheduleAutonomousCheck();
+});
 $('space-ptt').addEventListener('change', (event) => {
   state.spacePttEnabled = event.target.checked;
   event.target.blur();
@@ -541,8 +597,9 @@ window.addEventListener('blur', () => {
 });
 window.addEventListener('beforeunload', () => {
   if (state.voxEnabled) disableVox();
+  if (state.autonomousTimer) clearTimeout(state.autonomousTimer);
 });
 
 setVoxPhase('off');
 refreshControls();
-loadSession().catch(showError);
+loadSession().then(scheduleAutonomousCheck).catch(showError);
