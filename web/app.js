@@ -67,7 +67,7 @@ function renderSession(session) {
     $('voice-status').textContent = 'No reference uploaded';
     $('clear-voice').hidden = true;
   }
-  $('messages').querySelectorAll('.message').forEach((node) => node.remove());
+  $('messages').querySelectorAll('.message, .empty-state').forEach((node) => node.remove());
   if (!(session.messages || []).length) {
     $('messages').insertAdjacentHTML('afterbegin', '<div id="empty-state" class="empty-state"><div class="orb">◉</div><h2>Ready when you are.</h2><p>Send a text message or hold the PTT button to speak.</p></div>');
   }
@@ -190,6 +190,12 @@ function stopRecording() {
 $('chat-form').addEventListener('submit', (event) => {
   event.preventDefault();
   sendText($('message').value);
+});
+$('message').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    sendText(event.currentTarget.value);
+  }
 });
 $('save-settings').addEventListener('click', () => saveSettings().catch(showError));
 $('voice-file').addEventListener('change', (event) => uploadVoice(event.target.files[0]));

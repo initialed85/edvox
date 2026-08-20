@@ -17,6 +17,9 @@ for the button. Spacebar PTT is opt-in via the `Enable Spacebar PTT` checkbox;
 this prevents the browser's normal Spacebar scroll behavior from being hijacked
 unless explicitly enabled. The settings panel also has `Record my voice`, which
 records a browser microphone clip and installs it as the session's clone voice.
+Press Enter in the message box to send; use Shift+Enter for a multiline message.
+New sessions start with a voice-oriented system prompt that can be edited or
+replaced in the session settings.
 
 Start the frontend and its resident services:
 

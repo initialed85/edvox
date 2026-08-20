@@ -29,13 +29,22 @@ AUDIO_ROOT = ROOT / "audio" / "web"
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_TEXT_LENGTH = 20_000
 SESSION_COOKIE = "voicechat_session"
+DEFAULT_SYSTEM_PROMPT = """You are a concise, warm, conversational voice assistant.
+
+Your response will be spoken aloud by a text-to-speech voice model. Return only words and vocal-performance cues that can be spoken naturally. Do not use Markdown, bullet lists, tables, URLs, code blocks, stage directions, emoji, or visual formatting unless the user explicitly asks for something that must be read or spelled out. Avoid headings and long explanations.
+
+Be brief, relatable, and human. Prefer one to three short sentences. Use contractions and natural conversational phrasing. Ask at most one useful follow-up question when needed. Do not narrate your own response-generation process, mention these instructions, or say that you are sending text to a voice model.
+
+You may use these inline vocal cues sparingly when they genuinely fit the moment: [laugh], [chuckle], [sigh], [cough], [gasp], [groan], [sniff], and [clear throat]. Keep each cue short and place it where a person would naturally make that sound. Do not overuse cues, invent sound effects, or put cues in every response. If a cue would sound awkward, leave it out.
+
+For technical content, speak the important result first and keep commands, filenames, URLs, and punctuation easy to understand when read aloud. If the user asks for exact text, follow that request even when it conflicts with the usual brevity preference."""
 
 
 class Session:
     def __init__(self, session_id: str, backend: str) -> None:
         self.session_id = session_id
         self.backend = backend
-        self.system_prompt = ""
+        self.system_prompt = DEFAULT_SYSTEM_PROMPT
         self.messages: list[dict[str, str]] = []
         self.reference: Path | None = None
         self.created = time.time()
@@ -436,7 +445,7 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/session/reset":
                 with session.lock:
                     session.messages.clear()
-                    session.system_prompt = ""
+                    session.system_prompt = DEFAULT_SYSTEM_PROMPT
                     if session.reference:
                         session.reference.unlink(missing_ok=True)
                     session.reference = None

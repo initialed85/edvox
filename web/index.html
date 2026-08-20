@@ -29,7 +29,7 @@
         </select>
 
         <label for="system-prompt">System prompt <span class="muted">(session only)</span></label>
-        <textarea id="system-prompt" rows="6" placeholder="You are a concise, mischievous voice assistant…"></textarea>
+        <textarea id="system-prompt" rows="12" placeholder="Voice-assistant instructions…"></textarea>
         <button id="save-settings" class="secondary-button" type="button">Save session settings</button>
 
         <div class="voice-upload">
@@ -54,7 +54,7 @@
         </div>
         <div id="activity" class="activity" hidden></div>
         <form id="chat-form" class="composer">
-          <textarea id="message" rows="2" placeholder="Type a message…" autocomplete="off"></textarea>
+          <textarea id="message" rows="2" placeholder="Type a message…" autocomplete="off" aria-label="Message"></textarea>
           <div class="composer-actions">
             <button id="ptt-button" class="ptt-button" type="button">
               <span class="mic-icon">●</span><span>Hold to talk</span>
@@ -63,7 +63,7 @@
           </div>
         </form>
         <label class="keyboard-toggle"><input id="space-ptt" type="checkbox"> Enable Spacebar PTT</label>
-        <p id="keyboard-note" class="keyboard-note">Spacebar is navigation only; use the PTT button to talk.</p>
+        <p id="keyboard-note" class="keyboard-note">Enter sends · Shift+Enter inserts a new line · Spacebar is navigation only.</p>
       </div>
     </section>
 
