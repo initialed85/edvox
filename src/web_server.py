@@ -24,7 +24,9 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = ROOT / "web"
 VOICE_ROOT = ROOT / "voices" / "web"
 AUDIO_ROOT = ROOT / "audio" / "web"
-MAX_UPLOAD_BYTES = 30 * 1024 * 1024
+# General request safety limit. Voice-reference uploads intentionally bypass this
+# limit so long recordings are accepted; they are still converted before use.
+MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_TEXT_LENGTH = 20_000
 SESSION_COOKIE = "voicechat_session"
 
@@ -332,10 +334,12 @@ class Handler(BaseHTTPRequestHandler):
     def send_error_json(self, status: int, message: str) -> None:
         self.send_json(status, {"error": message})
 
-    def read_body(self) -> bytes:
+    def read_body(self, *, max_bytes: int | None = MAX_REQUEST_BYTES) -> bytes:
         length = int(self.headers.get("Content-Length", "0"))
-        if length < 0 or length > MAX_UPLOAD_BYTES:
-            raise ValueError(f"request body exceeds {MAX_UPLOAD_BYTES // (1024 * 1024)} MiB")
+        if length < 0:
+            raise ValueError("request body length is invalid")
+        if max_bytes is not None and length > max_bytes:
+            raise ValueError(f"request body exceeds {max_bytes // (1024 * 1024)} MiB")
         return self.rfile.read(length)
 
     def do_GET(self) -> None:
@@ -399,7 +403,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/session/voice":
-                body = parse_multipart(self.headers.get("Content-Type", ""), self.read_body())
+                # Clone references are deliberately uncapped. A long recording can
+                # still be normalized by ffmpeg and validated by duration below.
+                body = parse_multipart(self.headers.get("Content-Type", ""), self.read_body(max_bytes=None))
                 if "voice" not in body:
                     raise ValueError("voice file is required")
                 filename, _content_type, data = body["voice"]
