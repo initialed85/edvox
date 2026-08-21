@@ -11,3 +11,4 @@ __pycache__/
 *.wav
 
 .venv-chatterbox/
+.DS_Store

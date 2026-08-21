@@ -1,7 +1,14 @@
 # Local development HTTPS for browser microphone access.
 # Override CADDY_DOMAIN, CADDY_PORT, or CADDY_UPSTREAM in the environment if needed.
-# Caddy's local CA certificate covers this hostname; use it rather than the raw LAN IP.
 https://{$CADDY_DOMAIN:icarus.local}:{$CADDY_PORT:8443} {
-    tls internal
-    reverse_proxy {$CADDY_UPSTREAM:127.0.0.1:8200}
+	tls internal
+	reverse_proxy {$CADDY_UPSTREAM:127.0.0.1:8200}
+}
+
+# The Kubernetes Traefik ingress preserves the public Host header on the
+# inside leg, so Caddy must recognise it as well. Traefik supplies the
+# icarus.local SNI and skips verification for this local-CA certificate.
+https://edvox.dev.initialed85.cc:{$CADDY_PORT:8443} {
+	tls internal
+	reverse_proxy {$CADDY_UPSTREAM:127.0.0.1:8200}
 }
