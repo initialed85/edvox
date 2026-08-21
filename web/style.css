@@ -36,7 +36,7 @@ label { display: block; margin: 18px 0 8px; color: #d8dbe1; font-size: 12px; fon
 select, textarea, input[type=file] { width: 100%; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2); color: var(--text); padding: 11px 12px; outline: none; }
 select:focus, textarea:focus { border-color: var(--purple); box-shadow: 0 0 0 3px #9d7cff22; }
 textarea { resize: vertical; line-height: 1.45; }
-#system-prompt { min-height: 210px; font-size: 12px; }
+#persona { min-height: 170px; font-size: 12px; }
 input[type=file] { color: var(--muted); font-size: 12px; padding: 9px; }
 button { border: 0; }
 .secondary-button, .quiet-button, .clone-button { border: 1px solid var(--line); border-radius: 9px; background: transparent; color: var(--text); padding: 9px 12px; font-size: 12px; }
@@ -87,4 +87,4 @@ button { border: 0; }
 kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; color: #d8dbe1; }
 .keyboard-note { margin: 0; padding: 3px 16px 14px; text-align: right; }
 footer { padding: 18px 4px; color: #666c77; font-size: 11px; }
-@media (max-width: 760px) { .app-shell { width: min(100% - 22px, 620px); padding-top: 24px; } .topbar { margin-bottom: 18px; } .control-grid { flex: none; grid-template-columns: 1fr; } .conversation-panel { height: min(760px, calc(100vh - 170px)); min-height: 500px; } .settings-panel { order: 2; } .message { max-width: 94%; } .vox-controls { align-items: flex-start; flex-direction: column; gap: 7px; } }
+@media (max-width: 760px) { .app-shell { width: min(100% - 22px, 620px); padding-top: 24px; } .topbar { margin-bottom: 18px; } .control-grid { flex: none; grid-template-columns: 1fr; } .conversation-panel { height: min(900px, calc(100vh - 120px)); min-height: 620px; } .settings-panel { order: 2; } .message { max-width: 94%; } .vox-controls { align-items: flex-start; flex-direction: column; gap: 7px; } }
