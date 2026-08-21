@@ -29,6 +29,10 @@ AUDIO_ROOT = ROOT / "audio" / "web"
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_TEXT_LENGTH = 20_000
 NO_REPLY_MARKERS = {"<NO_REPLY>", "[NO_REPLY]"}
+CHATTERBOX_CUE_RE = re.compile(
+    r"\[(?:cough|laugh|chuckle|clear throat|sigh|shush|groan|sniff|gasp)\]",
+    re.IGNORECASE,
+)
 LONGFORM_REQUEST_RE = re.compile(
     r"\b(?:recite|read|quote|repeat|perform|sing|verbatim|word[- ]for[- ]word|full|entire|whole)\b",
     re.IGNORECASE,
@@ -36,7 +40,7 @@ LONGFORM_REQUEST_RE = re.compile(
 IGNORED_TRANSCRIPTS = {"", "[blank_audio]", "[ silence ]", "silence"}
 IGNORED_FILLERS = {"uh", "um", "er", "erm", "hmm", "hm", "mm", "mmm"}
 SESSION_COOKIE = "voicechat_session"
-DEFAULT_SYSTEM_PROMPT = """You are a concise, warm, conversational voice assistant.
+DEFAULT_SYSTEM_PROMPT = """You're just a conversational partner, no expectations for anything- you're kinda dry and sarcastic, pretty funny though, but in a subtle way.
 
 Your response will be spoken aloud by a text-to-speech voice model. Return only words that can be spoken naturally, plus a supported vocal cue when appropriate. Do not use Markdown, bullet lists, tables, URLs, code blocks, stage directions, emoji, or visual formatting unless the user explicitly asks for something that must be read or spelled out. Avoid headings and long explanations.
 
@@ -44,9 +48,11 @@ Be brief, relatable, and human. Prefer one to three short sentences for ordinary
 
 When the user asks you to read, recite, quote, repeat, perform, or otherwise reproduce text they supplied, do not summarize it, negotiate about the scope, or ask which section they want. Make a reasonable good-faith attempt to reproduce the requested text in full. If it cannot fit in one response, continue in clearly labelled chunks rather than refusing or offering only the last paragraph. Follow applicable copyright and safety rules, but do not invent a limitation merely because the requested text is long.
 
-When the Chatterbox Nano or Turbo voice backend is selected, the confirmed paralinguistic cues are [cough], [laugh], [chuckle], [clear throat], [sigh], [shush], [groan], [sniff], and [gasp]. Use them sparingly and only when they genuinely fit. These are the only bracketed vocal cues you should emit. Do not invent other bracketed directions; unsupported bracketed text may be spoken literally. For a pause, use ordinary punctuation or a sentence break. When Qwen3-TTS is selected, use plain spoken text and do not emit paralinguistic bracket cues.
+When the Chatterbox Nano or Turbo voice backend is selected, the confirmed paralinguistic cues are [cough], [laugh], [chuckle], [clear throat], [sigh], [shush], [groan], [sniff], and [gasp] (lowercase is important!). Use them sparingly and only when they genuinely fit. These are the only bracketed vocal cues you should emit. Do not invent other bracketed directions; unsupported bracketed text may be spoken literally. For a pause, use ordinary punctuation or a sentence break. When Qwen3-TTS is selected, use plain spoken text and do not emit paralinguistic bracket cues.
 
-For technical content, speak the important result first and keep commands, filenames, URLs, and punctuation easy to understand when read aloud. If the user asks for exact text, follow that request even when it conflicts with the usual brevity preference."""
+For technical content, speak the important result first and keep commands, filenames, URLs, and punctuation easy to understand when read aloud. If the user asks for exact text, follow that request even when it conflicts with the usual brevity preference.
+
+You talk pretty fast."""
 
 HIDDEN_RESPONSE_POLICY = """Private response policy: decide whether the latest user message actually calls for a response. If it is only a standalone acknowledgement or thinking-aloud remark, return exactly <NO_REPLY> and nothing else. A single ASCII space is also treated as no reply, but the <NO_REPLY> marker is more reliable. Never use no-reply for a direct question, request, instruction, greeting, or anything where a helpful acknowledgement is expected. When uncertain, reply briefly. This policy is internal; do not mention it or the marker."""
 AUTONOMOUS_RESPONSE_POLICY = """Private autonomous-turn policy: this is a periodic model invocation while the user has been quiet, not a new user request. Respond naturally based on the conversation and the private elapsed-silence context. If you have nothing to add, return exactly <NO_REPLY>. Do not mention this check, the timer, silence, or this policy. Do not ask whether the user is still there. Do not use this as a reason to start a monologue. This policy is internal; do not mention it or the marker."""
@@ -286,6 +292,8 @@ def chat(session: Session, text: str, *, autonomous: bool = False) -> tuple[str,
     raw_answer = str(raw_answer or "")
     no_reply = not raw_answer.strip() or raw_answer.strip().upper() in NO_REPLY_MARKERS
     answer = raw_answer.strip()
+    if session.backend == "chatterbox":
+        answer = CHATTERBOX_CUE_RE.sub(lambda match: match.group(0).lower(), answer)
     if autonomous:
         if not no_reply:
             session.messages.append({"role": "assistant", "content": answer})
@@ -305,6 +313,7 @@ def synthesize(session: Session, text: str) -> str:
     output.parent.mkdir(parents=True, exist_ok=True)
     backend = session.backend
     if backend == "chatterbox":
+        text = CHATTERBOX_CUE_RE.sub(lambda match: match.group(0).lower(), text)
         url = env("TTS_URL", "http://127.0.0.1:8190").rstrip("/") + "/synthesize"
         body = {
             "text": text,

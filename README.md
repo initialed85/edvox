@@ -50,12 +50,15 @@ this experiment, and checks pause while VOX is recording, processing, or
 speaking. VOX may remain enabled and armed while checks run. Turn it off if the
 assistant becomes too chatty.
 
-New sessions start with a voice-oriented system prompt that can be edited or
-replaced in the session settings. Chatterbox Nano and Turbo officially document
-these paralinguistic tags: `[cough]`, `[laugh]`, `[chuckle]`, `[clear throat]`,
-`[sigh]`, `[shush]`, `[groan]`, `[sniff]`, and `[gasp]`. Do not use arbitrary
-bracketed directions such as `[slight pause]`; unsupported text may be spoken
-literally. Use ordinary punctuation for pauses.
+New sessions start with a dry, subtly sarcastic conversational system prompt
+that can be edited or replaced in the session settings. Chatterbox Nano and
+Turbo officially document these paralinguistic tags: `[cough]`, `[laugh]`,
+`[chuckle]`, `[clear throat]`, `[sigh]`, `[shush]`, `[groan]`, `[sniff]`, and
+`[gasp]`. The web server normalizes these supported cues to lowercase before
+storing and sending Chatterbox responses, so variants such as `[Chuckle]` are
+sent as `[chuckle]`. Do not use arbitrary bracketed directions such as
+`[slight pause]`; unsupported text may be spoken literally. Use ordinary
+punctuation for pauses.
 
 Start the frontend and its resident services:
 
