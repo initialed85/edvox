@@ -38,10 +38,12 @@ def main() -> int:
             result = json.load(response)
     except urllib.error.HTTPError as error:
         raise RuntimeError(f"STT server returned HTTP {error.code}: {error.read().decode(errors='replace')}") from error
+    # An empty transcript is a valid result for silence or noise. The web
+    # server applies its own transcript filter and should return ignored=true
+    # rather than turning this normal outcome into an HTTP 500.
     text = str(result.get("text", "")).strip()
-    if not text:
-        raise RuntimeError(f"STT server returned no text: {result!r}")
-    print(text)
+    if text:
+        print(text)
     return 0
 
 
