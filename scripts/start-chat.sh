@@ -10,13 +10,16 @@ if [ ! -x "$server" ]; then
   exit 1
 fi
 
-hf_repo=${CHAT_HF_REPO:-unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL}
+# hf_repo="${CHAT_HF_REPO:-unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL}"
+hf_repo="${CHAT_HF_REPO:-HauhauCS/Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive:Q4_K_M}"
+
 model_path=${CHAT_MODEL_PATH:-}
 ctx_size=${CHAT_CTX_SIZE:-32768}
-spec_type=${CHAT_SPEC_TYPE:-draft-mtp}
+# spec_type=${CHAT_SPEC_TYPE:-draft-mtp}
+spec_type=${CHAT_SPEC_TYPE:-none}
 
 set -- "$server" \
-  --host "${CHAT_HOST:-127.0.0.1}" \
+  --host "${CHAT_HOST:-0.0.0.0}" \
   --port "${CHAT_PORT:-8088}" \
   --temp "${CHAT_TEMPERATURE:-0.6}" \
   --top-p "${CHAT_TOP_P:-0.95}" \
@@ -33,7 +36,7 @@ set -- "$server" \
   --cache-prompt \
   --reasoning "${CHAT_REASONING:-off}" \
   --no-ui \
-  --log-verbosity "${CHAT_LOG_VERBOSITY:-2}" \
+  --log-verbosity "${CHAT_LOG_VERBOSITY:-4}" \
   --offline
 
 if [ -n "$model_path" ]; then

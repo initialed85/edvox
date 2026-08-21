@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local Voice Chat</title>
+  <link rel="stylesheet" href="/admin/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">LOCAL VOICE CHAT</p>
+        <h1>Talk to your model.</h1>
+      </div>
+      <div id="service-status" class="status-pill">Checking services…</div>
+    </header>
+
+    <section class="control-grid">
+      <div class="panel settings-panel">
+        <div class="panel-heading">
+          <h2>Session</h2>
+          <button id="reset-button" class="quiet-button" type="button">Reset</button>
+        </div>
+        <label for="backend">Voice backend</label>
+        <select id="backend">
+          <option value="chatterbox">Chatterbox Nano</option>
+          <option value="qwen">Qwen3-TTS</option>
+        </select>
+
+        <label for="persona">Persona <span class="muted">(session only)</span></label>
+        <textarea id="persona" rows="9" placeholder="How should the assistant sound and behave?"></textarea>
+        <p class="hint">This controls tone and style. The voice interface's functional requirements stay protected by the application.</p>
+        <button id="save-settings" class="secondary-button" type="button">Save session settings</button>
+
+        <div class="voice-upload">
+          <div class="label-row">
+            <label for="voice-file">Clone voice</label>
+            <span id="voice-status" class="muted">No reference uploaded</span>
+          </div>
+          <input id="voice-file" type="file" accept="audio/*">
+          <p class="hint">Upload a clip longer than five seconds, or record yourself below. Your reference is kept for this browser session.</p>
+          <button id="clone-voice-button" class="clone-button" type="button">Record my voice</button>
+          <button id="clear-voice" class="quiet-button" type="button" hidden>Clear voice</button>
+        </div>
+      </div>
+
+      <div class="panel conversation-panel">
+        <div id="messages" class="messages" aria-live="polite">
+          <div id="empty-state" class="empty-state">
+            <div class="orb">◉</div>
+            <h2>Ready when you are.</h2>
+            <p>Enable VOX, send a text message, or hold the PTT button to speak.</p>
+          </div>
+        </div>
+        <div id="activity" class="activity" hidden></div>
+        <form id="chat-form" class="composer">
+          <textarea id="message" rows="2" placeholder="Type a message…" autocomplete="off" aria-label="Message"></textarea>
+          <div class="composer-actions">
+            <button id="ptt-button" class="ptt-button" type="button">
+              <span class="mic-icon">●</span><span>Hold to talk</span>
+            </button>
+            <button id="send-button" class="send-button" type="submit">Send <span>↗</span></button>
+          </div>
+        </form>
+        <div class="vox-controls">
+          <button id="vox-toggle" class="vox-button" type="button">
+            <span class="vox-dot" aria-hidden="true"></span><span class="vox-label">Enable VOX</span>
+          </button>
+          <span id="vox-status" class="vox-status">VOX is off. Enable it to listen for speech locally.</span>
+        </div>
+        <label class="keyboard-toggle"><input id="space-ptt" type="checkbox"> Enable Spacebar PTT</label>
+        <p id="keyboard-note" class="keyboard-note">Enter sends · Shift+Enter inserts a new line · Spacebar is navigation only.</p>
+        <label class="keyboard-toggle"><input id="wake-screen" type="checkbox"> Keep phone screen awake</label>
+        <p id="wake-note" class="keyboard-note">Keeps the screen awake while this page is visible, where supported.</p>
+        <label class="keyboard-toggle"><input id="autonomous-toggle" type="checkbox"> Enable autonomous check-ins</label>
+        <p id="autonomous-note" class="keyboard-note">Enabled by default. The model may make one brief, useful remark after silence.</p>
+      </div>
+    </section>
+
+    <footer>Everything runs locally on this machine. Session history is held in memory.</footer>
+  </main>
+  <script src="/admin/app.js"></script>
+</body>
+</html>

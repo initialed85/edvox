@@ -9,66 +9,53 @@ microphone -> Whisper STT -> llama-server chat -> TTS backend -> speakers
 
 ## Web frontend
 
-A local browser frontend is available on port `8200`. It provides session-local
-backend selection, persona editing, voice-reference upload, text chat, generated
-audio playback, and a push-to-talk button. The browser microphone permission is
-ordinary `getUserMedia` permission; no macOS Accessibility permission is needed
-for the button. The default web binding is `0.0.0.0`, so the UI can be opened
-from another device on the same LAN at `http://192.168.137.111:8200`. The
-backend services remain on loopback; only the browser-facing web UI is exposed.
-If macOS prompts to allow incoming connections, permit Python for the local
-network. Do not forward this port to the public internet without adding
-authentication and HTTPS. Spacebar PTT is opt-in via the `Enable Spacebar PTT` checkbox;
-this prevents the browser's normal Spacebar scroll behavior from being hijacked
-unless explicitly enabled. The settings panel also has `Record my voice`, which
-records a browser microphone clip and installs it as the session's clone voice.
-Press Enter in the message box to send; use Shift+Enter for a multiline message.
+The primary browser frontend is a deliberately minimal conversation surface at
+`/`. It starts VOX automatically when the page opens, keeps the fixed
+`DEFAULT_PERSONA`, and provides no persona, backend, voice-reference, text-chat,
+or mode controls. The single status orb indicates listening, processing,
+speaking, and microphone errors; it pulses while listening and reverberates
+while audio is playing. Tap it only to retry microphone permission after a
+startup failure.
 
-### VOX mode
+The previous full-featured browser frontend is retained at `/admin/`. It
+provides session-local backend selection, persona editing, voice-reference
+upload, text chat, generated audio playback, push-to-talk, VOX controls,
+and autonomous-check settings. The `/admin/` route is an operational surface,
+not an authentication boundary; add authentication before exposing it beyond
+the trusted network.
 
-The browser also has an opt-in **Enable VOX** mode. After microphone permission
-is granted, the browser analyzes the microphone signal locally and uploads only
-completed speech segments. The conversation area has its own scrollable history,
-so long conversations stay inside the browser viewport. It adapts to the local noise floor, keeps a short
-pre-roll, waits through a short conversational backoff before applying about
-1.4 seconds of sustained silence, then holds a short 1.8-second continuation
-window before submitting. Speech that resumes in that window is folded into the
-same recording rather than becoming a separate turn. A single utterance is capped
-at 30 seconds. Empty, silence-only, and short filler-only Whisper transcripts
-are discarded by the web server before the chat model or TTS is called.
+Both surfaces use ordinary `getUserMedia` permission; no macOS Accessibility
+permission is needed. The default web binding is `0.0.0.0`, so the UI can be
+opened from another device on the LAN. The backend services remain on loopback;
+only the browser-facing web UI is exposed. Do not forward this port to the
+public internet without authentication and HTTPS.
 
-VOX is intentionally half-duplex for now: it pauses listening while the
-assistant's audio reply plays, then arms itself again. The continuation window
-only applies before the upload; speech arriving after STT or chat has started
-cannot be retroactively added to that request and becomes a later turn. Disable
-VOX to return to button PTT or ordinary text chat.
+### Minimal conversation VOX mode
 
-The session also has an opt-in **Enable autonomous check-ins** switch. When it
-is enabled, the browser waits until the configured quiet period has elapsed,
-then makes a small model request. The model sees the elapsed quiet time and the
-conversation, and can either return `<NO_REPLY>` or speak naturally. Checks
-repeat at the configured interval for as long as the session remains quiet;
-there is no extra instruction trying to motivate a response. Any real user
-message resets the quiet-period timer. Checks can begin on a completely new
-session, before the first user message. The switch is enabled by default for
-this experiment, and checks pause while VOX is recording, processing, or
-speaking. VOX may remain enabled and armed while checks run. Turn it off if the
-assistant becomes too chatty.
+After microphone permission is granted, the primary frontend analyzes the
+microphone signal locally and uploads only completed speech segments. It adapts
+to the local noise floor, waits through a short conversational backoff before
+applying about 1.4 seconds of sustained silence, then holds a short 1.8-second
+continuation window before submitting. Speech that resumes in that window is
+folded into the same recording. A single utterance is capped at 30 seconds.
+Empty, silence-only, and short filler-only Whisper transcripts are discarded by
+the web server before the chat model or TTS is called.
 
-New sessions start with a dry, subtly sarcastic conversational persona that
-can be edited or replaced in the session settings. The application separately
-adds a server-owned runtime contract to every chat request. That contract
-contains the functional voice-interface requirements, spoken-output rules,
-confirmed vocal cues, and text-reproduction behavior; it is not exposed as an
-editable prompt. Hidden response and autonomous-turn policies are also kept
-separate from the persona. Chatterbox Nano and Turbo officially document these
-paralinguistic tags: `[cough]`, `[laugh]`,
+VOX is half-duplex: it releases microphone capture while the assistant's reply
+plays, then arms itself again. The browser also makes recurring autonomous
+quiet-period checks, including on a fresh session, and the model may return
+`<NO_REPLY>`. Checks pause while recording, processing, or speaking. Screen
+Wake Lock remains best-effort while the HTTPS page is visible.
+
+The application adds a server-owned runtime contract and the fixed
+`DEFAULT_PERSONA` to conversation-mode requests. The persona is not exposed by
+the primary UI and cannot be changed there. Chatterbox Nano and Turbo
+officially document these paralinguistic tags: `[cough]`, `[laugh]`,
 `[chuckle]`, `[clear throat]`, `[sigh]`, `[shush]`, `[groan]`, `[sniff]`, and
 `[gasp]`. The web server normalizes these supported cues to lowercase before
-storing and sending Chatterbox responses, so variants such as `[Chuckle]` are
-sent as `[chuckle]`. Do not use arbitrary bracketed directions such as
-`[slight pause]`; unsupported text may be spoken literally. Use ordinary
-punctuation for pauses.
+storing and sending Chatterbox responses. Do not use arbitrary bracketed
+directions such as `[slight pause]`; unsupported text may be spoken literally.
+Use ordinary punctuation for pauses.
 
 Start the frontend and its resident services:
 
@@ -377,11 +364,12 @@ Whisper HTTP server remains available for separate integrations.
 
 ## Persona and current-session history
 
-The browser frontend exposes only a session-local **persona**. It controls tone
-and style, while the web application retains a server-owned runtime contract
-for voice handling, spoken output, supported vocal cues, and text reproduction.
-The hidden no-reply and autonomous-turn policies are separate as well. Editing
-the persona cannot remove those functional requirements.
+The primary `/` conversation frontend uses the fixed `DEFAULT_PERSONA` and does
+not expose a persona editor. The full operational frontend at `/admin/` retains
+the session-local persona editor for testing and administration. In both cases,
+the web application retains a server-owned runtime contract for voice handling,
+spoken output, supported vocal cues, and text reproduction. The hidden no-reply
+and autonomous-turn policies are separate as well.
 
 The standalone voice loop still accepts a process-local system prompt. It is
 not saved by this repository:
@@ -422,8 +410,10 @@ A text-driven session is useful for testing without the microphone:
 The first `--text` value is processed immediately; subsequent prompts are read
 from the terminal. Exiting the process discards the system prompt and history.
 A normal one-shot invocation (`--text`, `--audio`, or one microphone turn) also
-has no persistent history. For the browser frontend, Reset restores the
-editable persona default; it does not alter the server-owned runtime contract.
+has no persistent history. Browser session history remains process-local; the
+primary conversation surface uses the fixed default persona, while `/admin/`
+can edit the session persona. The runtime contract is server-owned in either
+case.
 
 The web session also supplies a private timing hint after a configurable quiet
 period (`CHAT_SILENCE_CONTEXT_AFTER`, default 10 seconds). Autonomous checks

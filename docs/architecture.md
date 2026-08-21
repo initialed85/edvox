@@ -6,7 +6,7 @@ This document uses three views:
 2. **System diagram**: the internal runtime pieces and their boundaries.
 3. **Sequences**: the two flows that are easiest to misunderstand: a VOX turn and an autonomous check-in.
 
-The diagrams describe the browser-based deployment on `icarus.local`.
+The diagrams describe the browser-based deployment on `icarus.local`. The primary `/` route is the locked conversation surface; the full operational frontend is retained under `/admin/`.
 
 ## 1. System context — black box
 
@@ -40,9 +40,8 @@ supporting systems; they are not exposed directly to the browser.
 ```mermaid
 flowchart TB
     subgraph Client[Browser client]
-        ui[Web UI]
-        text[Text composer]
-        ptt[Push-to-talk and clone recording]
+        ui[Minimal conversation UI\nstatus orb]
+        admin[Admin UI\nsettings and history]
         vox[VOX detector\ngetUserMedia + local RMS/VAD]
         auto[Autonomous timer\nquiet-period checks]
         playback[Audio playback]
@@ -71,18 +70,18 @@ flowchart TB
     storage[(voices/web/<session>/reference.wav\naudio/<session>/response-*.wav)]
 
     user([User]) --> ui
-    ui --> text
-    ui --> ptt
     ui --> vox
     ui --> auto
+    admin --> vox
+    admin --> auto
     playback --> user
 
-    ui -->|HTTPS| caddy
+    ui -->|HTTPS /| caddy
+    admin -->|HTTPS /admin/| caddy
     caddy -->|reverse proxy| web
 
-    text -->|POST /api/chat| web
-    ptt -->|POST /api/voice-turn| web
     vox -->|speech segment only\nPOST /api/voice-turn| web
+    admin -->|text, PTT, settings, voice APIs| web
     auto -->|POST /api/autonomous-turn| web
     playback <-->|audio URL| web
 
@@ -102,7 +101,7 @@ flowchart TB
     classDef app fill:#eef8ed,stroke:#4d8a4a,color:#183519
     classDef service fill:#fff4df,stroke:#b27618,color:#3e2907
     classDef storage fill:#f3eafa,stroke:#8155a6,color:#28143b
-    class ui,text,ptt,vox,auto,playback client
+    class ui,admin,vox,auto,playback client
     class web,sessions,policy,media,whisperClient,qwenProc app
     class llama,whisper,chatter,qwenModels,caddy service
     class storage storage
@@ -111,7 +110,9 @@ flowchart TB
 ### Runtime boundaries
 
 - **Browser** owns microphone permission, local VOX analysis, recording, the
-  autonomous timer, and playback. It does not call the model services directly.
+  autonomous timer, and playback. The primary `/` client is locked to VOX and
+  the fixed default persona; `/admin/` exposes the operational controls. Neither
+  client calls model services directly.
 - **`web_server.py`** owns cookie-scoped sessions, history, prompts, quiet-time
   eligibility, no-reply handling, media conversion, and orchestration.
 - **Whisper** is resident and receives normalized audio through its HTTP
@@ -137,7 +138,8 @@ sequenceDiagram
     participant TTS as Chatterbox or Qwen
     participant Store as Session/audio files
 
-    User->>Browser: Speak
+    User->>Browser: Open `/` and speak
+    Browser->>Browser: Start VOX automatically
     Browser->>Browser: RMS/VAD detects onset
     Browser->>Browser: Buffer pre-roll and speech
     Browser->>Browser: Wait for trailing silence
@@ -187,7 +189,7 @@ sequenceDiagram
     participant Chat as llama-server
     participant TTS as Chatterbox or Qwen
 
-    User->>Browser: Open browser or complete a text/voice turn
+    User->>Browser: Open `/` or complete a text/voice turn
     Browser->>Browser: Start or reset timer; remain armed if VOX is enabled
     loop Every autonomous interval after the quiet threshold
         Browser->>Browser: Timer fires while page is open
@@ -212,8 +214,8 @@ sequenceDiagram
             end
         end
     end
-    User->>Browser: Speak or type again
-    Browser->>Web: Normal chat or voice-turn request
+    User->>Browser: Speak again, or use `/admin/` to type
+    Browser->>Web: Normal voice-turn or admin chat request
     Browser->>Browser: Reset autonomous schedule
 ```
 
