@@ -187,7 +187,7 @@ function addMessage(role, text, audioUrl = '') {
 
 function renderSession(session) {
   $('backend').value = session.backend || 'chatterbox';
-  $('system-prompt').value = session.system_prompt || '';
+  $('persona').value = session.persona || '';
   state.autonomousAfterSeconds = Number(session.autonomous_after_seconds || 10);
   state.autonomousIntervalSeconds = Number(session.autonomous_interval_seconds || state.autonomousAfterSeconds || 10);
 
@@ -223,7 +223,7 @@ async function saveSettings() {
   try {
     const session = await request('/api/session/settings', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({backend: $('backend').value, system_prompt: $('system-prompt').value}),
+      body: JSON.stringify({backend: $('backend').value, persona: $('persona').value}),
     });
     renderSession(session);
   } finally { setBusy(false); scheduleAutonomousCheck(); }

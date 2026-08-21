@@ -10,7 +10,7 @@ microphone -> Whisper STT -> llama-server chat -> TTS backend -> speakers
 ## Web frontend
 
 A local browser frontend is available on port `8200`. It provides session-local
-backend selection, system prompts, voice-reference upload, text chat, generated
+backend selection, persona editing, voice-reference upload, text chat, generated
 audio playback, and a push-to-talk button. The browser microphone permission is
 ordinary `getUserMedia` permission; no macOS Accessibility permission is needed
 for the button. The default web binding is `0.0.0.0`, so the UI can be opened
@@ -50,9 +50,14 @@ this experiment, and checks pause while VOX is recording, processing, or
 speaking. VOX may remain enabled and armed while checks run. Turn it off if the
 assistant becomes too chatty.
 
-New sessions start with a dry, subtly sarcastic conversational system prompt
-that can be edited or replaced in the session settings. Chatterbox Nano and
-Turbo officially document these paralinguistic tags: `[cough]`, `[laugh]`,
+New sessions start with a dry, subtly sarcastic conversational persona that
+can be edited or replaced in the session settings. The application separately
+adds a server-owned runtime contract to every chat request. That contract
+contains the functional voice-interface requirements, spoken-output rules,
+confirmed vocal cues, and text-reproduction behavior; it is not exposed as an
+editable prompt. Hidden response and autonomous-turn policies are also kept
+separate from the persona. Chatterbox Nano and Turbo officially document these
+paralinguistic tags: `[cough]`, `[laugh]`,
 `[chuckle]`, `[clear throat]`, `[sigh]`, `[shush]`, `[groan]`, `[sniff]`, and
 `[gasp]`. The web server normalizes these supported cues to lowercase before
 storing and sending Chatterbox responses, so variants such as `[Chuckle]` are
@@ -365,10 +370,16 @@ AFPLAY=afplay
 The current STT implementation invokes `whisper-cli` directly. The existing
 Whisper HTTP server remains available for separate integrations.
 
-## System prompt and current-session history
+## Persona and current-session history
 
-The voice loop accepts a system prompt. It is process-local and is not saved
-by this repository:
+The browser frontend exposes only a session-local **persona**. It controls tone
+and style, while the web application retains a server-owned runtime contract
+for voice handling, spoken output, supported vocal cues, and text reproduction.
+The hidden no-reply and autonomous-turn policies are separate as well. Editing
+the persona cannot remove those functional requirements.
+
+The standalone voice loop still accepts a process-local system prompt. It is
+not saved by this repository:
 
 ```bash
 CHAT_SYSTEM_PROMPT='You are a mischievous but useful voice assistant. Be concise.' \
@@ -406,7 +417,8 @@ A text-driven session is useful for testing without the microphone:
 The first `--text` value is processed immediately; subsequent prompts are read
 from the terminal. Exiting the process discards the system prompt and history.
 A normal one-shot invocation (`--text`, `--audio`, or one microphone turn) also
-has no persistent history.
+has no persistent history. For the browser frontend, Reset restores the
+editable persona default; it does not alter the server-owned runtime contract.
 
 The web session also supplies a private timing hint after a configurable quiet
 period (`CHAT_SILENCE_CONTEXT_AFTER`, default 10 seconds). Autonomous checks
