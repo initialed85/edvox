@@ -1,10 +1,10 @@
 const VOX_AUDIO_CONSTRAINTS = {
-  // VOX is half-duplex: playback is paused while listening, so browser echo
-  // cancellation is unnecessary and can make mobile browsers select a
-  // communications/handset audio route.
-  echoCancellation: false,
-  noiseSuppression: false,
-  autoGainControl: false,
+  // These help speech detection while the microphone is active. The stream is
+  // fully released before output playback, so it cannot keep the browser in a
+  // communications/handset audio route while the reply is speaking.
+  echoCancellation: true,
+  noiseSuppression: true,
+  autoGainControl: true,
   channelCount: 1,
 };
 
@@ -97,25 +97,21 @@ async function runAutonomousCheck() {
     return;
   }
   state.autonomousInFlight = true;
+  const voxPaused = pauseVoxForWork();
   setBusy(true, 'Checking in…');
   let result;
   try {
     result = await request('/api/autonomous-turn', {method: 'POST'});
     if (result.skipped && !result.retry) return;
-    if (!result.skipped) {
-      if (!result.no_reply && result.reply) {
-        const audio = addMessage('assistant', result.reply, result.audio_url, result.timings);
-        if (audio && state.voxEnabled) {
-          setVoxPhase('speaking');
-          await waitForPlayback(audio);
-          if (state.voxEnabled) setVoxPhase('armed');
-        }
-      }
+    if (!result.skipped && !result.no_reply && result.reply) {
+      const audio = addMessage('assistant', result.reply, result.audio_url, result.timings);
+      if (voxPaused) await waitForPlayback(audio);
     }
   } catch (error) {
     showError(error);
   } finally {
     state.autonomousInFlight = false;
+    if (voxPaused && state.voxEnabled) await resumeVoxAfterWork();
     setBusy(false, formatTimings(result?.timings));
     scheduleAutonomousCheck();
   }
@@ -253,6 +249,7 @@ async function sendText(text) {
   if (!text.trim() || state.busy) return;
   $('message').value = '';
   addMessage('user', text.trim());
+  const voxPaused = pauseVoxForWork();
   setBusy(true, 'Thinking and synthesizing…');
   let result;
   try {
@@ -260,10 +257,14 @@ async function sendText(text) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text.trim()}),
     });
-    if (!result.no_reply) addMessage('assistant', result.reply, result.audio_url, result.timings);
+    if (!result.no_reply) {
+      const audio = addMessage('assistant', result.reply, result.audio_url, result.timings);
+      if (voxPaused) await waitForPlayback(audio);
+    }
   } catch (error) {
     showError(error);
   } finally {
+    if (voxPaused && state.voxEnabled) await resumeVoxAfterWork();
     setBusy(false, formatTimings(result?.timings));
     scheduleAutonomousCheck();
   }
@@ -313,16 +314,14 @@ async function handleAudio(blob, {vox = false} = {}) {
     addMessage('user', result.transcript);
     const audio = result.no_reply ? null : addMessage('assistant', result.reply, result.audio_url, result.timings);
     if (vox) {
-      state.voxPlaybackPaused = true;
       setVoxPhase('speaking');
       setBusy(true, 'Speaking…');
       await waitForPlayback(audio);
-      state.voxPlaybackPaused = false;
     }
   } catch (error) { showError(error); }
   finally {
+    if (vox && state.voxEnabled) await resumeVoxAfterWork();
     setBusy(false, formatTimings(result?.timings));
-    if (vox && state.voxEnabled) setVoxPhase('armed');
     scheduleAutonomousCheck();
   }
 }
@@ -473,9 +472,9 @@ function startVoxRecorder(now) {
       state.voxLastSpeechAt = 0;
       state.voxBackoffUntil = 0;
       if (submit && blob.size && state.voxEnabled) {
-        setVoxPhase('processing');
+        pauseVoxForWork();
         handleAudio(blob, {vox: true});
-      } else if (state.voxEnabled) {
+      } else if (state.voxEnabled && !state.voxPlaybackPaused) {
         setVoxPhase('armed');
       }
     };
@@ -560,6 +559,34 @@ function stopVoxCapture() {
   state.voxContext = null;
   state.voxAnalyser = null;
   state.voxData = null;
+}
+
+// VOX is half-duplex. Do not leave microphone capture or an AudioContext alive
+// while the browser is playing the reply: mobile browsers may route audio as
+// a call, and desktop browsers can otherwise keep the capture/output paths
+// competing with one another.
+function pauseVoxForWork() {
+  if (!state.voxEnabled || state.voxPlaybackPaused) return false;
+  state.voxPlaybackPaused = true;
+  state.voxSubmit = false;
+  if (state.voxRecorder?.state === 'recording') state.voxRecorder.stop();
+  setVoxPhase('processing');
+  stopVoxCapture();
+  return true;
+}
+
+async function resumeVoxAfterWork() {
+  if (!state.voxEnabled || !state.voxPlaybackPaused) return;
+  state.voxPlaybackPaused = false;
+  try {
+    await startVoxCapture();
+    if (state.voxEnabled) setVoxPhase('armed');
+  } catch (error) {
+    state.voxEnabled = false;
+    stopVoxCapture();
+    setVoxPhase('off');
+    showError(error);
+  }
 }
 
 async function enableVox() {
