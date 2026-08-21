@@ -14,6 +14,10 @@ const VOX_CONFIG = {
   // A conversational pause is not necessarily the end of an utterance. Keep
   // listening through ordinary pauses, then give Whisper a final quiet tail.
   silenceMs: 1400,
+  // After endpointing, keep the recorder alive briefly so a natural
+  // continuation can be folded into the same upload instead of becoming a
+  // second turn. This is deliberately shorter than the normal silence tail.
+  continuationMs: 1800,
   backoffMs: 700,
   maxUtteranceMs: 30000,
   startFloor: 0.012,
@@ -47,6 +51,7 @@ const state = {
   voxCandidateSince: 0,
   voxLastSpeechAt: 0,
   voxBackoffUntil: 0,
+  voxContinuationUntil: 0,
   voxSubmit: false,
   autonomousEnabled: true,
   autonomousAfterSeconds: 10,
@@ -471,6 +476,7 @@ function startVoxRecorder(now) {
       state.voxCandidateSince = 0;
       state.voxLastSpeechAt = 0;
       state.voxBackoffUntil = 0;
+      state.voxContinuationUntil = 0;
       if (submit && blob.size && state.voxEnabled) {
         pauseVoxForWork();
         handleAudio(blob, {vox: true});
@@ -497,6 +503,13 @@ function stopVoxRecorder(submit) {
   if (recorder.state === 'recording') recorder.stop();
 }
 
+function beginVoxContinuation(now) {
+  if (!state.voxRecorder || state.voxRecorder.state !== 'recording') return;
+  state.voxContinuationUntil = now + VOX_CONFIG.continuationMs;
+  state.voxLastSpeechAt = now;
+  setVoxStatus('Pause detected… continue speaking if you have more to say.');
+}
+
 function voxTick(now) {
   if (!state.voxEnabled || !state.voxAnalyser) return;
   const rms = rmsFromAnalyser();
@@ -516,12 +529,20 @@ function voxTick(now) {
   } else if (state.voxPhase === 'recording' && !state.busy) {
     if (rms > thresholds.speech) {
       state.voxLastSpeechAt = now;
+      state.voxContinuationUntil = 0;
+      setVoxStatus('Speech detected — waiting for the end of your utterance…');
     } else if (
-      now >= state.voxBackoffUntil &&
-      now - state.voxLastSpeechAt >= VOX_CONFIG.silenceMs
+      state.voxContinuationUntil &&
+      now >= state.voxContinuationUntil
     ) {
       const longEnough = now - state.voxCandidateSince >= VOX_CONFIG.minSpeechMs;
       stopVoxRecorder(longEnough);
+    } else if (
+      !state.voxContinuationUntil &&
+      now >= state.voxBackoffUntil &&
+      now - state.voxLastSpeechAt >= VOX_CONFIG.silenceMs
+    ) {
+      beginVoxContinuation(now);
     } else if (now - state.voxCandidateSince >= VOX_CONFIG.maxUtteranceMs) {
       stopVoxRecorder(true);
     }
@@ -610,6 +631,7 @@ async function enableVox() {
 function disableVox() {
   state.voxEnabled = false;
   state.voxSubmit = false;
+  state.voxContinuationUntil = 0;
   state.voxBackoffUntil = 0;
   if (state.voxRecorder?.state === 'recording') state.voxRecorder.stop();
   state.voxRecorder = null;

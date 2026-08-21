@@ -140,8 +140,13 @@ sequenceDiagram
     User->>Browser: Speak
     Browser->>Browser: RMS/VAD detects onset
     Browser->>Browser: Buffer pre-roll and speech
-    Browser->>Browser: Wait for trailing silence or 30-second cap
-    Browser->>Web: POST /api/voice-turn with audio segment
+    Browser->>Browser: Wait for trailing silence
+    Browser->>Browser: Hold 1.8-second continuation window
+    alt Speech resumes
+        Browser->>Browser: Extend same MediaRecorder segment
+    else Still silent or 30-second cap
+        Browser->>Web: POST /api/voice-turn with combined audio segment
+    end
     Web->>Web: Normalize upload with ffmpeg
     Web->>STT: POST /inference with WAV
     STT-->>Web: Transcript

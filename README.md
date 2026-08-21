@@ -31,12 +31,17 @@ is granted, the browser analyzes the microphone signal locally and uploads only
 completed speech segments. The conversation area has its own scrollable history,
 so long conversations stay inside the browser viewport. It adapts to the local noise floor, keeps a short
 pre-roll, waits through a short conversational backoff before applying about
-1.4 seconds of sustained silence, and caps a single utterance at 30 seconds. Empty, silence-only, and short filler-only Whisper transcripts
+1.4 seconds of sustained silence, then holds a short 1.8-second continuation
+window before submitting. Speech that resumes in that window is folded into the
+same recording rather than becoming a separate turn. A single utterance is capped
+at 30 seconds. Empty, silence-only, and short filler-only Whisper transcripts
 are discarded by the web server before the chat model or TTS is called.
 
 VOX is intentionally half-duplex for now: it pauses listening while the
-assistant's audio reply plays, then arms itself again. Disable VOX to return to
-button PTT or ordinary text chat.
+assistant's audio reply plays, then arms itself again. The continuation window
+only applies before the upload; speech arriving after STT or chat has started
+cannot be retroactively added to that request and becomes a later turn. Disable
+VOX to return to button PTT or ordinary text chat.
 
 The session also has an opt-in **Enable autonomous check-ins** switch. When it
 is enabled, the browser waits until the configured quiet period has elapsed,
