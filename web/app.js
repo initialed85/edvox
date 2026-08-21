@@ -1,3 +1,13 @@
+const VOX_AUDIO_CONSTRAINTS = {
+  // VOX is half-duplex: playback is paused while listening, so browser echo
+  // cancellation is unnecessary and can make mobile browsers select a
+  // communications/handset audio route.
+  echoCancellation: false,
+  noiseSuppression: false,
+  autoGainControl: false,
+  channelCount: 1,
+};
+
 const VOX_CONFIG = {
   calibrationMs: 800,
   minSpeechMs: 300,
@@ -45,6 +55,7 @@ const state = {
   autonomousInFlight: false,
   keepScreenAwake: true,
   wakeLock: null,
+  voxPlaybackPaused: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -93,7 +104,7 @@ async function runAutonomousCheck() {
     if (result.skipped && !result.retry) return;
     if (!result.skipped) {
       if (!result.no_reply && result.reply) {
-        const audio = addMessage('assistant', result.reply, result.audio_url);
+        const audio = addMessage('assistant', result.reply, result.audio_url, result.timings);
         if (audio && state.voxEnabled) {
           setVoxPhase('speaking');
           await waitForPlayback(audio);
@@ -161,7 +172,7 @@ async function request(path, options = {}) {
   return payload;
 }
 
-function addMessage(role, text, audioUrl = '') {
+function addMessage(role, text, audioUrl = '', timings = null) {
   $('empty-state')?.remove();
   const item = document.createElement('article');
   item.className = `message ${role}`;
@@ -177,8 +188,17 @@ function addMessage(role, text, audioUrl = '') {
     audio = document.createElement('audio');
     audio.controls = true;
     audio.autoplay = true;
+    audio.playsInline = true;
+    audio.setAttribute('playsinline', '');
     audio.src = audioUrl;
     item.append(audio);
+  }
+  const timingText = formatTimings(timings);
+  if (timingText) {
+    const timing = document.createElement('div');
+    timing.className = 'message-timing';
+    timing.textContent = timingText;
+    item.append(timing);
   }
   $('messages').append(item);
   $('messages').scrollTop = $('messages').scrollHeight;
@@ -203,8 +223,8 @@ function renderSession(session) {
     $('messages').insertAdjacentHTML('afterbegin', '<div id="empty-state" class="empty-state"><div class="orb">◉</div><h2>Ready when you are.</h2><p>Enable VOX, send a text message, or hold the PTT button to speak.</p></div>');
   }
   (session.messages || []).forEach((message) => {
-    if (message.role === 'user' && message.content?.trim()) addMessage('user', message.content);
-    if (message.role === 'assistant' && message.content?.trim()) addMessage('assistant', message.content);
+    if (message.role === 'user' && message.content?.trim()) addMessage('user', message.content, '', message.timings);
+    if (message.role === 'assistant' && message.content?.trim()) addMessage('assistant', message.content, '', message.timings);
   });
 }
 
@@ -240,7 +260,7 @@ async function sendText(text) {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text.trim()}),
     });
-    if (!result.no_reply) addMessage('assistant', result.reply, result.audio_url);
+    if (!result.no_reply) addMessage('assistant', result.reply, result.audio_url, result.timings);
   } catch (error) {
     showError(error);
   } finally {
@@ -291,11 +311,13 @@ async function handleAudio(blob, {vox = false} = {}) {
     result = await request('/api/voice-turn', {method: 'POST', body: form});
     if (result.ignored) return;
     addMessage('user', result.transcript);
-    const audio = result.no_reply ? null : addMessage('assistant', result.reply, result.audio_url);
+    const audio = result.no_reply ? null : addMessage('assistant', result.reply, result.audio_url, result.timings);
     if (vox) {
+      state.voxPlaybackPaused = true;
       setVoxPhase('speaking');
       setBusy(true, 'Speaking…');
       await waitForPlayback(audio);
+      state.voxPlaybackPaused = false;
     }
   } catch (error) { showError(error); }
   finally {
@@ -508,37 +530,48 @@ function voxTick(now) {
   state.voxAnimationFrame = requestAnimationFrame(voxTick);
 }
 
+async function startVoxCapture() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) throw new Error('this browser does not support local audio analysis');
+  state.voxStream = await getMicrophone({audio: VOX_AUDIO_CONSTRAINTS});
+  state.voxStream.getAudioTracks().forEach((track) => {
+    track.applyConstraints(VOX_AUDIO_CONSTRAINTS).catch(() => {});
+  });
+  state.voxContext = new AudioContextClass();
+  await state.voxContext.resume();
+  const source = state.voxContext.createMediaStreamSource(state.voxStream);
+  state.voxAnalyser = state.voxContext.createAnalyser();
+  state.voxAnalyser.fftSize = 1024;
+  state.voxAnalyser.smoothingTimeConstant = 0;
+  source.connect(state.voxAnalyser);
+  state.voxData = new Uint8Array(state.voxAnalyser.fftSize);
+  state.voxStartedAt = performance.now();
+  state.voxNoiseFloor = VOX_CONFIG.startFloor;
+  state.voxCalibrated = false;
+  state.voxAnimationFrame = requestAnimationFrame(voxTick);
+}
+
+function stopVoxCapture() {
+  if (state.voxAnimationFrame) cancelAnimationFrame(state.voxAnimationFrame);
+  state.voxAnimationFrame = null;
+  state.voxStream?.getTracks().forEach((track) => track.stop());
+  state.voxStream = null;
+  if (state.voxContext) state.voxContext.close().catch(() => {});
+  state.voxContext = null;
+  state.voxAnalyser = null;
+  state.voxData = null;
+}
+
 async function enableVox() {
   if (state.busy || state.voxEnabled) return;
   setBusy(true, 'Requesting microphone permission…');
+  state.voxEnabled = true;
   try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) throw new Error('this browser does not support local audio analysis');
-    state.voxStream = await getMicrophone({
-      audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true},
-    });
-    state.voxContext = new AudioContextClass();
-    await state.voxContext.resume();
-    const source = state.voxContext.createMediaStreamSource(state.voxStream);
-    state.voxAnalyser = state.voxContext.createAnalyser();
-    state.voxAnalyser.fftSize = 1024;
-    state.voxAnalyser.smoothingTimeConstant = 0;
-    source.connect(state.voxAnalyser);
-    state.voxData = new Uint8Array(state.voxAnalyser.fftSize);
-    state.voxStartedAt = performance.now();
-    state.voxNoiseFloor = VOX_CONFIG.startFloor;
-    state.voxCalibrated = false;
-    state.voxEnabled = true;
+    await startVoxCapture();
     setVoxPhase('armed');
-    state.voxAnimationFrame = requestAnimationFrame(voxTick);
   } catch (error) {
     state.voxEnabled = false;
-    state.voxAnalyser = null;
-    state.voxData = null;
-    state.voxStream?.getTracks().forEach((track) => track.stop());
-    state.voxStream = null;
-    if (state.voxContext) state.voxContext.close().catch(() => {});
-    state.voxContext = null;
+    stopVoxCapture();
     setVoxPhase('off');
     showError(error);
   } finally {
@@ -551,17 +584,11 @@ function disableVox() {
   state.voxEnabled = false;
   state.voxSubmit = false;
   state.voxBackoffUntil = 0;
-  if (state.voxAnimationFrame) cancelAnimationFrame(state.voxAnimationFrame);
-  state.voxAnimationFrame = null;
   if (state.voxRecorder?.state === 'recording') state.voxRecorder.stop();
   state.voxRecorder = null;
   state.voxChunks = [];
-  state.voxStream?.getTracks().forEach((track) => track.stop());
-  state.voxStream = null;
-  if (state.voxContext) state.voxContext.close().catch(() => {});
-  state.voxContext = null;
-  state.voxAnalyser = null;
-  state.voxData = null;
+  stopVoxCapture();
+  state.voxPlaybackPaused = false;
   state.voxPhase = 'off';
   setVoxPhase('off');
   refreshControls();

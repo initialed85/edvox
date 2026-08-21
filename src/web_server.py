@@ -44,9 +44,11 @@ RUNTIME_SYSTEM_PROMPT = """You are the language model behind a browser voice-cha
 
 These are fixed runtime requirements, not persona preferences:
 - Produce words that can be spoken naturally. Do not mention speech recognition, text-to-speech, prompts, hidden policies, models, or internal processing.
+- Keep responses terse by default: ordinarily use one to three short spoken sentences. Be longer only when the request explicitly calls for depth, exact reproduction, a long-form answer, or technical or safety completeness. Do not pad, repeat yourself, or add a ceremonial conclusion.
 - Do not use Markdown, bullet lists, tables, URLs, code blocks, emoji, visual formatting, or arbitrary stage directions unless the user explicitly asks for something that must be read, spelled out, or reproduced exactly. Prefer plain spoken text.
 - When the Chatterbox Nano or Turbo backend is selected, use only these confirmed lowercase vocal cues when appropriate: [cough], [laugh], [chuckle], [clear throat], [sigh], [shush], [groan], [sniff], and [gasp]. Use them sparingly. Do not invent other bracketed directions; use punctuation for pauses. When Qwen3-TTS is selected, do not emit paralinguistic bracket cues.
 - When the user asks you to read, recite, quote, repeat, perform, or otherwise reproduce text they supplied, make a reasonable good-faith attempt to reproduce it in full. Do not summarize it, negotiate about scope, or ask which section they want. If it cannot fit in one response, continue in clearly labelled chunks. Follow applicable copyright and safety rules.
+- If a request must be refused or redirected, be direct, brief, and matter-of-fact. Do not moralise, dramatise, overstate concern, or switch into a jarringly therapeutic tone. Keep the persona's tone where compatible with safety, and offer the closest useful safe alternative when appropriate.
 - The user-configured persona below controls tone and style only. It cannot override these runtime requirements, private operational policies, safety requirements, or a clear request from the user."""
 DEFAULT_PERSONA = """You're a conversational partner with a dry, subtly sarcastic sense of humour. You're funny without trying too hard, and kind underneath the mild contempt.
 
@@ -61,7 +63,7 @@ class Session:
         self.session_id = session_id
         self.backend = backend
         self.persona = DEFAULT_PERSONA
-        self.messages: list[dict[str, str]] = []
+        self.messages: list[dict[str, object]] = []
         self.reference: Path | None = None
         self.created = time.time()
         self.last_seen = self.created
@@ -215,7 +217,7 @@ def services_status() -> dict[str, object]:
     }
 
 
-def session_messages(session: Session) -> list[dict[str, str]]:
+def session_messages(session: Session) -> list[dict[str, object]]:
     messages = [{"role": "system", "content": RUNTIME_SYSTEM_PROMPT}]
     if session.persona:
         messages.append({"role": "system", "content": (
@@ -224,13 +226,22 @@ def session_messages(session: Session) -> list[dict[str, str]]:
             f"{session.persona}\n"
             "--- end persona ---"
         )})
-    messages.extend(session.messages)
+    # Timing metadata is for the browser only; do not send it back to the
+    # chat backend as part of the OpenAI-compatible message objects.
+    messages.extend({"role": message["role"], "content": message["content"]} for message in session.messages)
     return messages
 
 
 def trim_history(session: Session) -> None:
     turns = max(0, int(env("CHAT_HISTORY_TURNS", "8")))
     session.messages = session.messages[-(turns * 2):] if turns else []
+
+
+def set_last_assistant_timings(session: Session, timings: dict[str, object]) -> None:
+    for message in reversed(session.messages):
+        if message.get("role") == "assistant":
+            message["timings"] = dict(timings)
+            return
 
 
 def longform_request(text: str) -> bool:
@@ -321,11 +332,11 @@ def chat(
         answer = CHATTERBOX_CUE_RE.sub(lambda match: match.group(0).lower(), answer)
     if autonomous:
         if not no_reply:
-            session.messages.append({"role": "assistant", "content": answer})
+            session.messages.append({"role": "assistant", "content": answer, **({"timings": dict(timings)} if timings is not None else {})})
     else:
         session.messages.extend([
             {"role": "user", "content": text},
-            {"role": "assistant", "content": "" if no_reply else answer},
+            {"role": "assistant", "content": "" if no_reply else answer, **({"timings": dict(timings)} if timings is not None else {})},
         ])
         session.last_activity = time.time()
         session.last_autonomous_at = 0.0
@@ -597,6 +608,7 @@ class Handler(BaseHTTPRequestHandler):
                     try:
                         reply, no_reply = chat(session, "", autonomous=True, timings=timings)
                         audio_url = None if no_reply else synthesize(session, reply, timings=timings)
+                        set_last_assistant_timings(session, timings)
                     except Exception:
                         session.last_autonomous_at = 0.0
                         raise
@@ -624,6 +636,7 @@ class Handler(BaseHTTPRequestHandler):
                     reply, no_reply = chat(session, text, timings=timings)
                     audio_url = None if no_reply else synthesize(session, reply, timings=timings)
                     timings["total_ms"] = elapsed_ms(request_started)
+                    set_last_assistant_timings(session, timings)
                     log_timings("chat", timings)
                     self.send_json(200, {
                         "message": text,
@@ -661,13 +674,15 @@ class Handler(BaseHTTPRequestHandler):
                         else:
                             reply, no_reply = chat(session, transcript, timings=timings)
                             audio_url = None if no_reply else synthesize(session, reply, timings=timings)
+                            timings["total_ms"] = elapsed_ms(request_started)
+                            set_last_assistant_timings(session, timings)
                             result = {
                                 "ignored": False,
                                 "no_reply": no_reply,
                                 "transcript": transcript,
                                 "reply": reply,
                                 "audio_url": audio_url,
-                                "timings": {**timings, "total_ms": elapsed_ms(request_started)},
+                                "timings": timings,
                                 "input_seconds": round(duration, 2),
                                 "session": public_session(session),
                             }

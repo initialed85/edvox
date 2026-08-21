@@ -49,7 +49,7 @@ button { border: 0; }
 .hint { margin: 9px 0 10px; }
 .clone-button { width: 100%; color: var(--accent); border-color: #39442a; background: #202817; }
 .clone-button.recording { border-color: var(--danger); background: #3a1d22; color: #ffadad; box-shadow: 0 0 0 4px #ff777722; }
-.conversation-panel { min-height: 0; height: min(760px, calc(100vh - 210px)); display: flex; flex-direction: column; overflow: hidden; }
+.conversation-panel { min-height: 0; height: min(1080px, calc(100vh - 120px)); display: flex; flex-direction: column; overflow: hidden; }
 .messages { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 28px; }
 .empty-state { display: grid; place-items: center; align-content: center; min-height: 430px; text-align: center; color: var(--muted); }
 .empty-state h2 { margin: 20px 0 8px; color: var(--text); }
@@ -62,6 +62,7 @@ button { border: 0; }
 .message.user .message-body { border-radius: 14px 14px 3px 14px; background: #29321a; padding: 12px 14px; }
 .message.assistant .message-body { border-left: 2px solid var(--purple); padding: 4px 14px; }
 .message audio { display: block; width: min(100%, 360px); height: 34px; margin-top: 11px; }
+.message-timing { margin-top: 8px; padding-left: 14px; color: var(--muted); font-size: 10px; opacity: .78; }
 .activity { padding: 0 28px 12px; color: var(--muted); font-size: 12px; }
 .activity::before { content: ""; display: inline-block; width: 7px; height: 7px; margin-right: 8px; border-radius: 50%; background: var(--accent); animation: pulse 1s infinite alternate; }
 @keyframes pulse { to { opacity: .25; } }
@@ -87,4 +88,4 @@ button { border: 0; }
 kbd { border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; color: #d8dbe1; }
 .keyboard-note { margin: 0; padding: 3px 16px 14px; text-align: right; }
 footer { padding: 18px 4px; color: #666c77; font-size: 11px; }
-@media (max-width: 760px) { .app-shell { width: min(100% - 22px, 620px); padding-top: 24px; } .topbar { margin-bottom: 18px; } .control-grid { flex: none; grid-template-columns: 1fr; } .conversation-panel { height: min(900px, calc(100vh - 120px)); min-height: 620px; } .settings-panel { order: 2; } .message { max-width: 94%; } .vox-controls { align-items: flex-start; flex-direction: column; gap: 7px; } }
+@media (max-width: 760px) { .app-shell { width: min(100% - 22px, 620px); padding-top: 24px; } .topbar { margin-bottom: 18px; } .control-grid { flex: none; grid-template-columns: 1fr; } .conversation-panel { height: min(1400px, calc(100vh - 55px)); min-height: 920px; } .settings-panel { order: 2; } .message { max-width: 94%; } .vox-controls { align-items: flex-start; flex-direction: column; gap: 7px; } }
