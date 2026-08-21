@@ -162,6 +162,14 @@ def run_checked(command: list[str], timeout: float) -> subprocess.CompletedProce
     return subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
 
 
+def elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 1)
+
+
+def log_timings(operation: str, timings: dict[str, object]) -> None:
+    print(f"web-server: {operation} timings={json.dumps(timings, sort_keys=True)}", file=sys.stderr, flush=True)
+
+
 def convert_audio(data: bytes, suffix: str, destination: Path) -> float:
     destination.parent.mkdir(parents=True, exist_ok=True)
     source = destination.parent / f".{destination.stem}.upload-{uuid.uuid4().hex}{suffix or '.audio'}"
@@ -243,7 +251,14 @@ def silence_context(session: Session) -> dict[str, str] | None:
     )}
 
 
-def chat(session: Session, text: str, *, autonomous: bool = False) -> tuple[str, bool]:
+def chat(
+    session: Session,
+    text: str,
+    *,
+    autonomous: bool = False,
+    timings: dict[str, object] | None = None,
+) -> tuple[str, bool]:
+    started = time.perf_counter()
     if len(text) > MAX_TEXT_LENGTH:
         raise ValueError(f"message is limited to {MAX_TEXT_LENGTH} characters")
     messages = session_messages(session)
@@ -290,6 +305,11 @@ def chat(session: Session, text: str, *, autonomous: bool = False) -> tuple[str,
     except (KeyError, IndexError, TypeError) as error:
         raise RuntimeError(f"unexpected chat response: {payload!r}") from error
     raw_answer = str(raw_answer or "")
+    if timings is not None:
+        timings["chat_ms"] = elapsed_ms(started)
+        server_timings = payload.get("timings")
+        if isinstance(server_timings, dict):
+            timings["chat_server"] = server_timings
     no_reply = not raw_answer.strip() or raw_answer.strip().upper() in NO_REPLY_MARKERS
     answer = raw_answer.strip()
     if session.backend == "chatterbox":
@@ -308,7 +328,13 @@ def chat(session: Session, text: str, *, autonomous: bool = False) -> tuple[str,
     return answer, no_reply
 
 
-def synthesize(session: Session, text: str) -> str:
+def synthesize(
+    session: Session,
+    text: str,
+    *,
+    timings: dict[str, object] | None = None,
+) -> str:
+    started = time.perf_counter()
     output = AUDIO_ROOT / session.session_id / f"response-{uuid.uuid4().hex}.wav"
     output.parent.mkdir(parents=True, exist_ok=True)
     backend = session.backend
@@ -331,6 +357,8 @@ def synthesize(session: Session, text: str) -> str:
             raise RuntimeError(f"Chatterbox returned HTTP {error.code}: {detail[-1000:]}") from error
         if not payload.get("output"):
             raise RuntimeError(f"Chatterbox returned an invalid response: {payload!r}")
+        if timings is not None and isinstance(payload.get("generation_seconds"), (int, float)):
+            timings["tts_model_ms"] = round(float(payload["generation_seconds"]) * 1000, 1)
     elif backend == "qwen":
         command = [
             str(ROOT / "bin" / "llama-tts"),
@@ -352,10 +380,13 @@ def synthesize(session: Session, text: str) -> str:
         raise ValueError(f"unsupported TTS backend: {backend}")
     if not output.is_file():
         raise RuntimeError("TTS completed without producing an audio file")
+    if timings is not None:
+        timings["tts_ms"] = elapsed_ms(started)
     return f"/api/audio/{session.session_id}/{output.name}"
 
 
-def transcribe(audio: Path) -> str:
+def transcribe(audio: Path, *, timings: dict[str, object] | None = None) -> str:
+    started = time.perf_counter()
     try:
         result = subprocess.run(
             [sys.executable, str(ROOT / "src" / "whisper_client.py"), str(audio)],
@@ -365,7 +396,10 @@ def transcribe(audio: Path) -> str:
     except subprocess.CalledProcessError as error:
         detail = (error.stderr or error.stdout or "").strip()
         raise RuntimeError(f"speech recognition failed: {detail[-1000:]}") from error
-    return result.stdout.strip()
+    text = result.stdout.strip()
+    if timings is not None:
+        timings["stt_ms"] = elapsed_ms(started)
+    return text
 
 
 def transcript_is_ignored(text: str) -> bool:
@@ -534,6 +568,8 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/autonomous-turn":
                 with session.lock:
+                    request_started = time.perf_counter()
+                    timings: dict[str, object] = {}
                     threshold = float(env("CHAT_SILENCE_CONTEXT_AFTER", "10"))
                     interval = max(1.0, float(env("CHAT_AUTONOMOUS_INTERVAL", str(threshold))))
                     now = time.time()
@@ -554,39 +590,49 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     session.last_autonomous_at = now
                     try:
-                        reply, no_reply = chat(session, "", autonomous=True)
-                        audio_url = None if no_reply else synthesize(session, reply)
+                        reply, no_reply = chat(session, "", autonomous=True, timings=timings)
+                        audio_url = None if no_reply else synthesize(session, reply, timings=timings)
                     except Exception:
                         session.last_autonomous_at = 0.0
                         raise
+                    timings["total_ms"] = elapsed_ms(request_started)
+                    log_timings("autonomous", timings)
                     self.send_json(200, {
                         "skipped": False,
                         "autonomous": True,
                         "reply": reply,
                         "no_reply": no_reply,
                         "audio_url": audio_url,
+                        "timings": timings,
                         "session": public_session(session),
                     })
                 return
 
             if path == "/api/chat":
+                request_started = time.perf_counter()
+                timings: dict[str, object] = {}
                 payload = json.loads(self.read_body())
                 text = str(payload.get("message", "")).strip()
                 if not text:
                     raise ValueError("message is required")
                 with session.lock:
-                    reply, no_reply = chat(session, text)
-                    audio_url = None if no_reply else synthesize(session, reply)
+                    reply, no_reply = chat(session, text, timings=timings)
+                    audio_url = None if no_reply else synthesize(session, reply, timings=timings)
+                    timings["total_ms"] = elapsed_ms(request_started)
+                    log_timings("chat", timings)
                     self.send_json(200, {
                         "message": text,
                         "reply": reply,
                         "no_reply": no_reply,
                         "audio_url": audio_url,
+                        "timings": timings,
                         "session": public_session(session),
                     })
                 return
 
             if path == "/api/voice-turn":
+                request_started = time.perf_counter()
+                timings: dict[str, object] = {}
                 body = parse_multipart(self.headers.get("Content-Type", ""), self.read_body())
                 if "audio" not in body:
                     raise ValueError("audio file is required")
@@ -597,27 +643,30 @@ class Handler(BaseHTTPRequestHandler):
                 duration = convert_audio(data, safe_filename(filename, ".audio"), input_path)
                 try:
                     with session.lock:
-                        transcript = transcribe(input_path)
+                        transcript = transcribe(input_path, timings=timings)
                         if transcript_is_ignored(transcript):
                             result = {
                                 "ignored": True,
                                 "reason": "empty-or-noise-transcript",
                                 "transcript": transcript,
+                                "timings": {**timings, "total_ms": elapsed_ms(request_started)},
                                 "input_seconds": round(duration, 2),
                                 "session": public_session(session),
                             }
                         else:
-                            reply, no_reply = chat(session, transcript)
-                            audio_url = None if no_reply else synthesize(session, reply)
+                            reply, no_reply = chat(session, transcript, timings=timings)
+                            audio_url = None if no_reply else synthesize(session, reply, timings=timings)
                             result = {
                                 "ignored": False,
                                 "no_reply": no_reply,
                                 "transcript": transcript,
                                 "reply": reply,
                                 "audio_url": audio_url,
+                                "timings": {**timings, "total_ms": elapsed_ms(request_started)},
                                 "input_seconds": round(duration, 2),
                                 "session": public_session(session),
                             }
+                        log_timings("voice-turn", result["timings"])
                     self.send_json(200, result)
                 finally:
                     input_path.unlink(missing_ok=True)

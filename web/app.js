@@ -43,6 +43,8 @@ const state = {
   autonomousIntervalSeconds: 10,
   autonomousTimer: null,
   autonomousInFlight: false,
+  keepScreenAwake: true,
+  wakeLock: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -85,8 +87,9 @@ async function runAutonomousCheck() {
   }
   state.autonomousInFlight = true;
   setBusy(true, 'Checking in…');
+  let result;
   try {
-    const result = await request('/api/autonomous-turn', {method: 'POST'});
+    result = await request('/api/autonomous-turn', {method: 'POST'});
     if (result.skipped && !result.retry) return;
     if (!result.skipped) {
       if (!result.no_reply && result.reply) {
@@ -102,7 +105,7 @@ async function runAutonomousCheck() {
     showError(error);
   } finally {
     state.autonomousInFlight = false;
-    setBusy(false);
+    setBusy(false, formatTimings(result?.timings));
     scheduleAutonomousCheck();
   }
 }
@@ -113,6 +116,42 @@ function showError(error) {
   $('activity').textContent = `Error: ${message}`;
   $('activity').style.color = 'var(--danger)';
   setTimeout(() => { $('activity').style.color = ''; }, 3000);
+}
+
+function formatTimings(timings) {
+  if (!timings) return '';
+  const parts = [];
+  for (const [key, label] of [['stt_ms', 'STT'], ['chat_ms', 'chat'], ['tts_ms', 'TTS'], ['tts_model_ms', 'TTS model'], ['total_ms', 'total']]) {
+    if (typeof timings[key] === 'number') parts.push(`${label} ${(timings[key] / 1000).toFixed(1)}s`);
+  }
+  return parts.join(' · ');
+}
+
+async function requestWakeLock() {
+  if (!state.keepScreenAwake || !('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+  if (state.wakeLock && !state.wakeLock.released) return;
+  try {
+    state.wakeLock = await navigator.wakeLock.request('screen');
+    state.wakeLock.addEventListener('release', () => {
+      state.wakeLock = null;
+      if (state.keepScreenAwake && document.visibilityState === 'visible') {
+        setTimeout(() => requestWakeLock().catch(() => {}), 250);
+      }
+    }, {once: true});
+    $('wake-note').textContent = 'Screen wake lock is active while this page is visible.';
+  } catch (_) {
+    state.wakeLock = null;
+    $('wake-note').textContent = 'This browser did not allow screen wake lock.';
+  }
+}
+
+async function releaseWakeLock() {
+  const lock = state.wakeLock;
+  state.wakeLock = null;
+  if (lock && !lock.released) await lock.release().catch(() => {});
+  $('wake-note').textContent = state.keepScreenAwake
+    ? 'Wake lock will resume when the page is visible again.'
+    : 'The phone may lock normally.';
 }
 
 async function request(path, options = {}) {
@@ -195,15 +234,19 @@ async function sendText(text) {
   $('message').value = '';
   addMessage('user', text.trim());
   setBusy(true, 'Thinking and synthesizing…');
+  let result;
   try {
-    const result = await request('/api/chat', {
+    result = await request('/api/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({message: text.trim()}),
     });
     if (!result.no_reply) addMessage('assistant', result.reply, result.audio_url);
   } catch (error) {
     showError(error);
-  } finally { setBusy(false); scheduleAutonomousCheck(); }
+  } finally {
+    setBusy(false, formatTimings(result?.timings));
+    scheduleAutonomousCheck();
+  }
 }
 
 async function uploadVoice(file) {
@@ -241,10 +284,11 @@ async function waitForPlayback(audio) {
 
 async function handleAudio(blob, {vox = false} = {}) {
   setBusy(true, vox ? 'Transcribing…' : 'Transcribing, thinking, and synthesizing…');
+  let result;
   try {
     const form = new FormData();
     form.append('audio', blob, 'microphone.webm');
-    const result = await request('/api/voice-turn', {method: 'POST', body: form});
+    result = await request('/api/voice-turn', {method: 'POST', body: form});
     if (result.ignored) return;
     addMessage('user', result.transcript);
     const audio = result.no_reply ? null : addMessage('assistant', result.reply, result.audio_url);
@@ -255,7 +299,7 @@ async function handleAudio(blob, {vox = false} = {}) {
     }
   } catch (error) { showError(error); }
   finally {
-    setBusy(false);
+    setBusy(false, formatTimings(result?.timings));
     if (vox && state.voxEnabled) setVoxPhase('armed');
     scheduleAutonomousCheck();
   }
@@ -579,6 +623,12 @@ window.addEventListener('keyup', (event) => {
   stopRecording();
 });
 $('space-ptt').checked = state.spacePttEnabled;
+$('wake-screen').checked = state.keepScreenAwake;
+$('wake-screen').addEventListener('change', (event) => {
+  state.keepScreenAwake = event.target.checked;
+  if (state.keepScreenAwake) requestWakeLock().catch(() => {});
+  else releaseWakeLock().catch(() => {});
+});
 $('autonomous-toggle').checked = state.autonomousEnabled;
 $('autonomous-note').textContent = `Enabled. The model is checked every ${state.autonomousIntervalSeconds} seconds after silence.`;
 $('autonomous-toggle').addEventListener('change', (event) => {
@@ -599,11 +649,18 @@ window.addEventListener('blur', () => {
     stopRecording();
   }
 });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') requestWakeLock().catch(() => {});
+});
 window.addEventListener('beforeunload', () => {
   if (state.voxEnabled) disableVox();
   if (state.autonomousTimer) clearTimeout(state.autonomousTimer);
+  releaseWakeLock().catch(() => {});
 });
 
 setVoxPhase('off');
 refreshControls();
-loadSession().then(scheduleAutonomousCheck).catch(showError);
+loadSession().then(() => {
+  requestWakeLock().catch(() => {});
+  scheduleAutonomousCheck();
+}).catch(showError);

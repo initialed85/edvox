@@ -124,6 +124,15 @@ The HTTPS frontend gives a clear error if microphone capture is attempted over
 plain HTTP from another device. The HTTP endpoint remains available for
 localhost/testing.
 
+The page also offers a **Keep phone screen awake** option using the browser
+Screen Wake Lock API. It is best-effort: it works in browsers that support the
+API while the page is visible, and resumes after the page becomes visible again.
+It cannot keep JavaScript, microphone capture, audio playback, or autonomous
+checks alive after the phone is locked or the browser is suspended. A PWA does
+not remove those operating-system restrictions; for reliable background voice
+operation, a native app or platform-specific background audio/service mechanism
+would be required.
+
 To access the LAN-bound
 frontend from another machine, open `http://192.168.137.111:8200` or use an SSH
 tunnel:
