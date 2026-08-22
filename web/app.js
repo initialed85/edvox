@@ -5,41 +5,25 @@ const VOX_AUDIO_CONSTRAINTS = {
   channelCount: 1,
 };
 
+// Silero VAD handles speech probability, hysteresis, pre-roll, and endpointing.
+// These are deliberately a little more relaxed than the former RMS detector so
+// natural pauses do not split an utterance too eagerly.
 const VOX_CONFIG = {
-  calibrationMs: 800,
-  minSpeechMs: 300,
-  silenceMs: 1400,
-  continuationMs: 1800,
-  backoffMs: 700,
-  maxUtteranceMs: 30000,
-  startFloor: 0.012,
-  minStartRms: 0.025,
-  startMultiplier: 2.5,
-  startMargin: 0.012,
-  speechMultiplier: 1.6,
-  speechMargin: 0.006,
+  model: 'v5',
+  positiveSpeechThreshold: 0.30,
+  negativeSpeechThreshold: 0.25,
+  redemptionMs: 2000,
+  preSpeechPadMs: 800,
+  minSpeechMs: 350,
 };
 
 const state = {
   busy: false,
   voxEnabled: false,
   voxPhase: 'off',
-  voxStream: null,
-  voxContext: null,
-  voxAnalyser: null,
-  voxData: null,
-  voxAnimationFrame: null,
-  voxStartedAt: 0,
-  voxNoiseFloor: VOX_CONFIG.startFloor,
-  voxCalibrated: false,
-  voxRecorder: null,
-  voxChunks: [],
-  voxCandidateSince: 0,
-  voxLastSpeechAt: 0,
-  voxBackoffUntil: 0,
-  voxContinuationUntil: 0,
-  voxSubmit: false,
-  voxPlaybackPaused: false,
+  vad: null,
+  vadStarting: false,
+  voxPausedForWork: false,
   autonomousAfterSeconds: 10,
   autonomousIntervalSeconds: 10,
   autonomousTimer: null,
@@ -72,11 +56,6 @@ async function request(path, options = {}) {
   return payload;
 }
 
-function recorderOptions() {
-  return MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-    ? {mimeType: 'audio/webm;codecs=opus'} : {};
-}
-
 function microphoneError(error) {
   if (error?.name === 'NotAllowedError' || error?.name === 'SecurityError') {
     if (window.isSecureContext === false) {
@@ -92,175 +71,103 @@ function microphoneError(error) {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-async function getMicrophone(constraints) {
+async function getMicrophone() {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw microphoneError();
   try {
-    return await navigator.mediaDevices.getUserMedia(constraints);
+    const stream = await navigator.mediaDevices.getUserMedia({audio: VOX_AUDIO_CONSTRAINTS});
+    stream.getAudioTracks().forEach((track) => track.applyConstraints(VOX_AUDIO_CONSTRAINTS).catch(() => {}));
+    return stream;
   } catch (error) {
     throw microphoneError(error);
   }
 }
 
-function voxThresholds() {
-  return {
-    start: Math.max(VOX_CONFIG.minStartRms, state.voxNoiseFloor * VOX_CONFIG.startMultiplier + VOX_CONFIG.startMargin),
-    speech: Math.max(0.018, state.voxNoiseFloor * VOX_CONFIG.speechMultiplier + VOX_CONFIG.speechMargin),
+function encodeWav(samples, sampleRate = 16000) {
+  const pcm = samples instanceof Float32Array ? samples : new Float32Array(samples);
+  const buffer = new ArrayBuffer(44 + pcm.length * 2);
+  const view = new DataView(buffer);
+  const writeString = (offset, value) => {
+    for (let index = 0; index < value.length; index += 1) view.setUint8(offset + index, value.charCodeAt(index));
   };
-}
-
-function rmsFromAnalyser() {
-  state.voxAnalyser.getByteTimeDomainData(state.voxData);
-  let sum = 0;
-  for (const value of state.voxData) {
-    const sample = (value - 128) / 128;
-    sum += sample * sample;
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + pcm.length * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, pcm.length * 2, true);
+  for (let index = 0; index < pcm.length; index += 1) {
+    const sample = Math.max(-1, Math.min(1, pcm[index]));
+    view.setInt16(44 + index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
   }
-  return Math.sqrt(sum / state.voxData.length);
+  return new Blob([buffer], {type: 'audio/wav'});
 }
 
-function startVoxRecorder(now) {
-  if (!state.voxEnabled || state.voxRecorder || state.busy) return;
-  let recorder;
-  try {
-    recorder = new MediaRecorder(state.voxStream, recorderOptions());
-    state.voxChunks = [];
-    state.voxRecorder = recorder;
-    state.voxCandidateSince = now;
-    state.voxLastSpeechAt = now;
-    state.voxBackoffUntil = now + VOX_CONFIG.backoffMs;
-    state.voxSubmit = false;
-    recorder.ondataavailable = (event) => event.data.size && state.voxChunks.push(event.data);
-    recorder.onerror = () => {
-      state.voxSubmit = false;
-      if (recorder.state === 'recording') recorder.stop();
-      showError(new Error('Browser audio recording failed.'));
-    };
-    recorder.onstop = () => {
-      const blob = new Blob(state.voxChunks, {type: recorder.mimeType || 'audio/webm'});
-      if (state.voxRecorder === recorder) state.voxRecorder = null;
-      state.voxChunks = [];
-      const submit = state.voxSubmit;
-      state.voxSubmit = false;
-      state.voxCandidateSince = 0;
-      state.voxLastSpeechAt = 0;
-      state.voxBackoffUntil = 0;
-      state.voxContinuationUntil = 0;
-      if (submit && blob.size && state.voxEnabled) {
-        pauseVoxForWork();
-        handleAudio(blob);
-      } else if (state.voxEnabled && !state.voxPlaybackPaused) {
-        setPhase('active', 'Listening…');
-      }
-    };
-    recorder.start(100);
-    setPhase('recording', 'Listening…');
-  } catch (error) {
-    state.voxRecorder = null;
-    state.voxChunks = [];
-    showError(error);
+async function destroyVad() {
+  const detector = state.vad;
+  state.vad = null;
+  if (!detector) return;
+  try { await detector.destroy(); } catch (_) { /* Startup failures can leave a partial detector. */ }
+}
+
+async function createVad() {
+  if (!window.vad?.MicVAD) {
+    throw new Error('The voice detector failed to load. Refresh the page and try again.');
   }
+  return window.vad.MicVAD.new({
+    model: VOX_CONFIG.model,
+    positiveSpeechThreshold: VOX_CONFIG.positiveSpeechThreshold,
+    negativeSpeechThreshold: VOX_CONFIG.negativeSpeechThreshold,
+    redemptionMs: VOX_CONFIG.redemptionMs,
+    preSpeechPadMs: VOX_CONFIG.preSpeechPadMs,
+    minSpeechMs: VOX_CONFIG.minSpeechMs,
+    startOnLoad: false,
+    baseAssetPath: '/vendor/vad/',
+    onnxWASMBasePath: '/vendor/ort/',
+    getStream: getMicrophone,
+    resumeStream: getMicrophone,
+    onSpeechStart: () => {
+      if (state.voxEnabled && !state.busy) setPhase('recording', 'Listening…');
+    },
+    onSpeechRealStart: () => {
+      if (state.voxEnabled && !state.busy) setPhase('recording', 'Listening…');
+    },
+    onVADMisfire: () => {
+      if (state.voxEnabled && !state.busy) setPhase('active', 'Listening…');
+    },
+    onSpeechEnd: (audio) => {
+      if (state.voxEnabled && !state.busy) void handleAudio(audio);
+    },
+  });
 }
 
-function stopVoxRecorder(submit) {
-  const recorder = state.voxRecorder;
-  if (!recorder) {
-    if (state.voxEnabled) setPhase('active', 'Listening…');
-    return;
-  }
-  state.voxSubmit = submit;
-  if (recorder.state === 'recording') recorder.stop();
-}
-
-function beginVoxContinuation(now) {
-  if (!state.voxRecorder || state.voxRecorder.state !== 'recording') return;
-  state.voxContinuationUntil = now + VOX_CONFIG.continuationMs;
-  state.voxLastSpeechAt = now;
-  status.textContent = 'Still listening…';
-}
-
-function voxTick(now) {
-  if (!state.voxEnabled || !state.voxAnalyser) return;
-  const rms = rmsFromAnalyser();
-  const elapsed = now - state.voxStartedAt;
-  const calibrating = elapsed < VOX_CONFIG.calibrationMs;
-  const thresholds = voxThresholds();
-
-  if (state.voxPhase === 'active' && !state.busy) {
-    if (rms < thresholds.start) state.voxNoiseFloor = state.voxNoiseFloor * 0.95 + rms * 0.05;
-    if (!calibrating && rms > thresholds.start) startVoxRecorder(now);
-    if (!calibrating && !state.voxCalibrated) {
-      state.voxCalibrated = true;
-      status.textContent = 'Listening…';
-    }
-  } else if (state.voxPhase === 'recording' && !state.busy) {
-    if (rms > thresholds.speech) {
-      state.voxLastSpeechAt = now;
-      state.voxContinuationUntil = 0;
-      status.textContent = 'Listening…';
-    } else if (state.voxContinuationUntil && now >= state.voxContinuationUntil) {
-      const longEnough = now - state.voxCandidateSince >= VOX_CONFIG.minSpeechMs;
-      stopVoxRecorder(longEnough);
-    } else if (!state.voxContinuationUntil && now >= state.voxBackoffUntil && now - state.voxLastSpeechAt >= VOX_CONFIG.silenceMs) {
-      beginVoxContinuation(now);
-    } else if (now - state.voxCandidateSince >= VOX_CONFIG.maxUtteranceMs) {
-      stopVoxRecorder(true);
-    }
-  }
-  state.voxAnimationFrame = requestAnimationFrame(voxTick);
-}
-
-async function startVoxCapture() {
-  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-  if (!AudioContextClass) throw new Error('This browser does not support local audio analysis.');
-  state.voxStream = await getMicrophone({audio: VOX_AUDIO_CONSTRAINTS});
-  state.voxStream.getAudioTracks().forEach((track) => track.applyConstraints(VOX_AUDIO_CONSTRAINTS).catch(() => {}));
-  state.voxContext = new AudioContextClass();
-  await state.voxContext.resume();
-  const source = state.voxContext.createMediaStreamSource(state.voxStream);
-  state.voxAnalyser = state.voxContext.createAnalyser();
-  state.voxAnalyser.fftSize = 1024;
-  state.voxAnalyser.smoothingTimeConstant = 0;
-  source.connect(state.voxAnalyser);
-  state.voxData = new Uint8Array(state.voxAnalyser.fftSize);
-  state.voxStartedAt = performance.now();
-  state.voxNoiseFloor = VOX_CONFIG.startFloor;
-  state.voxCalibrated = false;
-  state.voxAnimationFrame = requestAnimationFrame(voxTick);
-}
-
-function stopVoxCapture() {
-  if (state.voxAnimationFrame) cancelAnimationFrame(state.voxAnimationFrame);
-  state.voxAnimationFrame = null;
-  state.voxStream?.getTracks().forEach((track) => track.stop());
-  state.voxStream = null;
-  if (state.voxContext) state.voxContext.close().catch(() => {});
-  state.voxContext = null;
-  state.voxAnalyser = null;
-  state.voxData = null;
-}
-
-function pauseVoxForWork() {
-  if (!state.voxEnabled || state.voxPlaybackPaused) return false;
-  state.voxPlaybackPaused = true;
-  state.voxSubmit = false;
-  if (state.voxRecorder?.state === 'recording') state.voxRecorder.stop();
+async function pauseVoxForWork() {
+  if (!state.voxEnabled || state.voxPausedForWork) return false;
+  state.voxPausedForWork = true;
   state.busy = true;
   setPhase('processing', 'Thinking…');
-  stopVoxCapture();
+  if (state.vad?.listening) await state.vad.pause();
   return true;
 }
 
 async function resumeVoxAfterWork() {
-  if (!state.voxEnabled || !state.voxPlaybackPaused) return;
-  state.voxPlaybackPaused = false;
-  state.busy = false;
+  if (!state.voxEnabled || !state.voxPausedForWork) return;
+  state.voxPausedForWork = false;
   try {
-    await startVoxCapture();
+    if (!state.vad) state.vad = await createVad();
+    await state.vad.start();
+    state.busy = false;
     if (state.voxEnabled) setPhase('active', 'Listening…');
   } catch (error) {
+    state.busy = false;
     state.voxEnabled = false;
-    stopVoxCapture();
-    setPhase('error', 'Microphone unavailable');
+    await destroyVad();
     showError(error);
   }
 }
@@ -285,25 +192,26 @@ async function waitForPlayback(audio) {
   });
 }
 
-async function handleAudio(blob) {
-  state.busy = true;
-  setPhase('processing', 'Thinking…');
-  let result;
+async function handleAudio(audioSamples) {
+  if (state.busy || !state.voxEnabled) return;
+  const paused = await pauseVoxForWork();
   try {
     const form = new FormData();
-    form.append('audio', blob, 'microphone.webm');
-    result = await request('/api/voice-turn', {
+    form.append('audio', encodeWav(audioSamples), 'microphone.wav');
+    const result = await request('/api/voice-turn', {
       method: 'POST',
       headers: {'X-Voice-Chat-Mode': 'conversation'},
       body: form,
     });
     if (result.ignored || result.no_reply) return;
-    setPhase('speaking', 'Speaking…');
-    await waitForPlayback(new Audio(result.audio_url));
+    if (result.audio_url) {
+      setPhase('speaking', 'Speaking…');
+      await waitForPlayback(new Audio(result.audio_url));
+    }
   } catch (error) {
     showError(error);
   } finally {
-    if (state.voxEnabled) await resumeVoxAfterWork();
+    if (paused && state.voxEnabled) await resumeVoxAfterWork();
     else state.busy = false;
     if (state.voxEnabled && state.voxPhase !== 'error') setPhase('active', 'Listening…');
     scheduleAutonomousCheck();
@@ -314,14 +222,14 @@ async function runAutonomousCheck() {
   state.autonomousTimer = null;
   if (state.busy || !state.voxEnabled || state.voxPhase !== 'active' || state.autonomousInFlight) return;
   state.autonomousInFlight = true;
-  const paused = pauseVoxForWork();
-  let result;
+  let paused = false;
   try {
-    result = await request('/api/autonomous-turn', {
+    paused = await pauseVoxForWork();
+    const result = await request('/api/autonomous-turn', {
       method: 'POST',
       headers: {'X-Voice-Chat-Mode': 'conversation'},
     });
-    if (!result.skipped && !result.no_reply) {
+    if (!result.skipped && !result.no_reply && result.audio_url) {
       setPhase('speaking', 'Speaking…');
       await waitForPlayback(new Audio(result.audio_url));
     }
@@ -354,31 +262,39 @@ async function requestWakeLock() {
 }
 
 async function enableVox() {
+  if (state.vadStarting || state.voxEnabled) return;
   errorBox.hidden = true;
+  state.vadStarting = true;
+  state.voxEnabled = true;
+  setPhase('processing', 'Loading voice detector…');
   try {
-    state.voxEnabled = true;
-    setPhase('processing', 'Starting microphone…');
-    await startVoxCapture();
+    state.vad = await createVad();
+    await state.vad.start();
+    if (!state.voxEnabled) return;
     setPhase('active', 'Listening…');
     scheduleAutonomousCheck();
   } catch (error) {
     state.voxEnabled = false;
-    stopVoxCapture();
+    await destroyVad();
     showError(error);
+  } finally {
+    state.vadStarting = false;
   }
 }
 
 function disableVox() {
   state.voxEnabled = false;
-  state.voxSubmit = false;
   if (state.autonomousTimer) clearTimeout(state.autonomousTimer);
   state.autonomousTimer = null;
-  if (state.voxRecorder?.state === 'recording') state.voxRecorder.stop();
-  state.voxRecorder = null;
-  state.voxChunks = [];
-  stopVoxCapture();
-  state.voxPlaybackPaused = false;
+  const detector = state.vad;
+  state.vad = null;
+  state.vadStarting = false;
+  state.voxPausedForWork = false;
   state.busy = false;
+  if (detector) {
+    detector.pause().catch(() => {});
+    detector.destroy().catch(() => {});
+  }
   setPhase('off', 'Tap the light to listen');
 }
 

@@ -24,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = ROOT / "web"
 VOICE_ROOT = ROOT / "voices" / "web"
 AUDIO_ROOT = ROOT / "audio" / "web"
+LLM_LOG_ROOT = ROOT / "logs" / "llm"
+SESSION_LOG_ROOT = ROOT / "logs" / "sessions"
 # General request safety limit. Voice-reference uploads intentionally bypass this
 # limit so long recordings are accepted; they are still converted before use.
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
@@ -82,10 +84,38 @@ def env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+def timestamp_slug(timestamp: float | None = None) -> str:
+    value = time.time() if timestamp is None else timestamp
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(value))
+
+
+def timestamp_iso(timestamp: float | None = None) -> str:
+    value = time.time() if timestamp is None else timestamp
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value))
+
+
+def write_session_manifest(session: Session) -> None:
+    SESSION_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    path = SESSION_LOG_ROOT / f"{session.session_id}.json"
+    if path.exists():
+        return
+    record = {
+        "session_id": session.session_id,
+        "created_at": session.created,
+        "created_at_iso": timestamp_iso(session.created),
+        "created_file_prefix": timestamp_slug(session.created),
+        "voice_directory": str(VOICE_ROOT / session.session_id),
+        "audio_directory": str(AUDIO_ROOT / session.session_id),
+        "llm_log": str(LLM_LOG_ROOT / f"{session.session_id}.jsonl"),
+    }
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def create_session() -> Session:
     session = Session(uuid.uuid4().hex, env("WEB_DEFAULT_TTS_BACKEND", "chatterbox"))
     with SESSIONS_LOCK:
         SESSIONS[session.session_id] = session
+    write_session_manifest(session)
     return session
 
 
@@ -100,20 +130,13 @@ def get_session(session_id: str | None) -> tuple[Session, bool]:
 
 
 def cleanup_sessions() -> None:
+    # In-memory session state expires, but archived voice and text records are
+    # deliberately not coupled to that TTL. The user will prune them manually.
     cutoff = time.time() - float(env("WEB_SESSION_TTL", "86400"))
     with SESSIONS_LOCK:
         stale = [sid for sid, session in SESSIONS.items() if session.last_seen < cutoff]
         for sid in stale:
             SESSIONS.pop(sid, None)
-    for sid in stale:
-        for root in (VOICE_ROOT / sid, AUDIO_ROOT / sid):
-            if root.is_dir():
-                for path in sorted(root.rglob("*"), reverse=True):
-                    if path.is_file() or path.is_symlink():
-                        path.unlink(missing_ok=True)
-                    elif path.is_dir():
-                        path.rmdir()
-                root.rmdir()
 
 
 def json_bytes(value: object) -> bytes:
@@ -170,6 +193,39 @@ def elapsed_ms(started: float) -> float:
 
 def log_timings(operation: str, timings: dict[str, object]) -> None:
     print(f"web-server: {operation} timings={json.dumps(timings, sort_keys=True)}", file=sys.stderr, flush=True)
+
+
+def log_llm_turn(
+    session: Session,
+    *,
+    kind: str,
+    user_text: str,
+    assistant_text: str,
+    no_reply: bool,
+    timings: dict[str, object],
+    input_file: Path | None = None,
+    output_file: Path | None = None,
+) -> None:
+    """Append a human-readable, machine-readable record for every LLM turn."""
+    timestamp = time.time()
+    LLM_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": timestamp,
+        "timestamp_iso": timestamp_iso(timestamp),
+        "session_id": session.session_id,
+        "kind": kind,
+        "user": user_text,
+        "assistant": assistant_text,
+        "no_reply": no_reply,
+        "backend": session.backend,
+        "reference_file": str(session.reference) if session.reference else None,
+        "input_file": str(input_file) if input_file else None,
+        "output_file": str(output_file) if output_file else None,
+        "timings": timings,
+    }
+    path = LLM_LOG_ROOT / f"{session.session_id}.jsonl"
+    with path.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
 
 
 def convert_audio(data: bytes, suffix: str, destination: Path) -> float:
@@ -361,7 +417,7 @@ def synthesize(
     timings: dict[str, object] | None = None,
 ) -> str:
     started = time.perf_counter()
-    output = AUDIO_ROOT / session.session_id / f"response-{uuid.uuid4().hex}.wav"
+    output = AUDIO_ROOT / session.session_id / f"{timestamp_slug()}-response-{uuid.uuid4().hex}.wav"
     output.parent.mkdir(parents=True, exist_ok=True)
     backend = session.backend
     if backend == "chatterbox":
@@ -522,6 +578,14 @@ class Handler(BaseHTTPRequestHandler):
             "/index.html": WEB_ROOT / "index.html",
             "/app.js": WEB_ROOT / "app.js",
             "/style.css": WEB_ROOT / "style.css",
+            "/vendor/vad/bundle.min.js": WEB_ROOT / "vendor" / "vad" / "bundle.min.js",
+            "/vendor/vad/vad.worklet.bundle.min.js": WEB_ROOT / "vendor" / "vad" / "vad.worklet.bundle.min.js",
+            "/vendor/vad/silero_vad_v5.onnx": WEB_ROOT / "vendor" / "vad" / "silero_vad_v5.onnx",
+            "/vendor/vad/silero_vad_legacy.onnx": WEB_ROOT / "vendor" / "vad" / "silero_vad_legacy.onnx",
+            "/vendor/ort/ort.wasm.min.js": WEB_ROOT / "vendor" / "ort" / "ort.wasm.min.js",
+            "/vendor/ort/ort.wasm.min.mjs": WEB_ROOT / "vendor" / "ort" / "ort.wasm.min.mjs",
+            "/vendor/ort/ort-wasm-simd-threaded.mjs": WEB_ROOT / "vendor" / "ort" / "ort-wasm-simd-threaded.mjs",
+            "/vendor/ort/ort-wasm-simd-threaded.wasm": WEB_ROOT / "vendor" / "ort" / "ort-wasm-simd-threaded.wasm",
             "/admin": WEB_ROOT / "admin" / "index.html",
             "/admin/": WEB_ROOT / "admin" / "index.html",
             "/admin/index.html": WEB_ROOT / "admin" / "index.html",
@@ -535,7 +599,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error_json(404, "not found")
                 return
             content_type = "text/html; charset=utf-8" if file.suffix == ".html" else (
-                "application/javascript; charset=utf-8" if file.suffix == ".js" else "text/css; charset=utf-8"
+                "application/javascript; charset=utf-8" if file.suffix in {".js", ".mjs"} else (
+                    "application/wasm" if file.suffix == ".wasm" else (
+                        "application/octet-stream" if file.suffix == ".onnx" else "text/css; charset=utf-8"
+                    )
+                )
             )
             self.send_bytes(200, file.read_bytes(), content_type)
             return
@@ -571,23 +639,23 @@ class Handler(BaseHTTPRequestHandler):
                 if not data:
                     raise ValueError("voice upload is empty")
                 session_dir = VOICE_ROOT / session.session_id
-                destination = session_dir / "reference.wav"
+                destination = session_dir / f"{timestamp_slug()}-reference-{uuid.uuid4().hex}.wav"
                 duration = convert_audio(data, safe_filename(filename, ".audio"), destination)
                 if duration <= 5.0:
+                    # Failed attempts are not useful voice references, so remove
+                    # only this invalid conversion; valid archived references are
+                    # never deleted by the service.
                     destination.unlink(missing_ok=True)
                     raise ValueError(f"voice reference must be longer than five seconds (received {duration:.1f}s)")
                 with session.lock:
-                    old = session.reference
                     session.reference = destination
-                if old and old != destination:
-                    old.unlink(missing_ok=True)
                 self.send_json(200, {"reference": destination.name, "duration_seconds": round(duration, 2)})
                 return
 
             if path == "/api/session/clear-voice":
                 with session.lock:
-                    if session.reference:
-                        session.reference.unlink(missing_ok=True)
+                    # Keep archived references; this only disarms the current
+                    # voice for future synthesis in this in-memory session.
                     session.reference = None
                 self.send_json(200, public_session(session))
                 return
@@ -598,8 +666,7 @@ class Handler(BaseHTTPRequestHandler):
                     session.persona = DEFAULT_PERSONA
                     session.last_activity = time.time()
                     session.last_autonomous_at = 0.0
-                    if session.reference:
-                        session.reference.unlink(missing_ok=True)
+                    # Keep archived references; reset clears active state only.
                     session.reference = None
                 self.send_json(200, public_session(session))
                 return
@@ -641,6 +708,15 @@ class Handler(BaseHTTPRequestHandler):
                         session.last_autonomous_at = 0.0
                         raise
                     timings["total_ms"] = elapsed_ms(request_started)
+                    log_llm_turn(
+                        session,
+                        kind="autonomous",
+                        user_text="",
+                        assistant_text=reply,
+                        no_reply=no_reply,
+                        timings=timings,
+                        output_file=(AUDIO_ROOT / session.session_id / Path(audio_url).name) if audio_url else None,
+                    )
                     log_timings("autonomous", timings)
                     self.send_json(200, {
                         "skipped": False,
@@ -670,6 +746,15 @@ class Handler(BaseHTTPRequestHandler):
                     audio_url = None if no_reply else synthesize(session, reply, timings=timings)
                     timings["total_ms"] = elapsed_ms(request_started)
                     set_last_assistant_timings(session, timings)
+                    log_llm_turn(
+                        session,
+                        kind="chat",
+                        user_text=text,
+                        assistant_text=reply,
+                        no_reply=no_reply,
+                        timings=timings,
+                        output_file=(AUDIO_ROOT / session.session_id / Path(audio_url).name) if audio_url else None,
+                    )
                     log_timings("chat", timings)
                     self.send_json(200, {
                         "message": text,
@@ -690,7 +775,7 @@ class Handler(BaseHTTPRequestHandler):
                 filename, _content_type, data = body["audio"]
                 if not data:
                     raise ValueError("audio upload is empty")
-                input_path = AUDIO_ROOT / session.session_id / f"input-{uuid.uuid4().hex}.wav"
+                input_path = AUDIO_ROOT / session.session_id / f"{timestamp_slug()}-input-{uuid.uuid4().hex}.wav"
                 duration = convert_audio(data, safe_filename(filename, ".audio"), input_path)
                 try:
                     with session.lock:
@@ -714,6 +799,16 @@ class Handler(BaseHTTPRequestHandler):
                             audio_url = None if no_reply else synthesize(session, reply, timings=timings)
                             timings["total_ms"] = elapsed_ms(request_started)
                             set_last_assistant_timings(session, timings)
+                            log_llm_turn(
+                                session,
+                                kind="voice",
+                                user_text=transcript,
+                                assistant_text=reply,
+                                no_reply=no_reply,
+                                timings=timings,
+                                input_file=input_path,
+                                output_file=(AUDIO_ROOT / session.session_id / Path(audio_url).name) if audio_url else None,
+                            )
                             result = {
                                 "ignored": False,
                                 "no_reply": no_reply,
@@ -727,7 +822,9 @@ class Handler(BaseHTTPRequestHandler):
                         log_timings("voice-turn", result["timings"])
                     self.send_json(200, result)
                 finally:
-                    input_path.unlink(missing_ok=True)
+                    # The normalized input recording is part of the local archive.
+                    # Housekeeping is intentionally deferred to the user.
+                    pass
                 return
             self.send_error_json(404, "not found")
         except json.JSONDecodeError as error:
@@ -754,6 +851,8 @@ def main() -> int:
         raise FileNotFoundError(f"web frontend not found: {WEB_ROOT}")
     VOICE_ROOT.mkdir(parents=True, exist_ok=True)
     AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
+    LLM_LOG_ROOT.mkdir(parents=True, exist_ok=True)
+    SESSION_LOG_ROOT.mkdir(parents=True, exist_ok=True)
     print(f"voice-chat web UI listening on http://{args.host}:{args.port}", file=sys.stderr, flush=True)
     server = WebServer((args.host, args.port), Handler)
     try:

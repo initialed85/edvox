@@ -42,7 +42,7 @@ flowchart TB
     subgraph Client[Browser client]
         ui[Minimal conversation UI\nstatus orb]
         admin[Admin UI\nsettings and history]
-        vox[VOX detector\ngetUserMedia + local RMS/VAD]
+        vox[VOX detector\ngetUserMedia + Silero VAD]
         auto[Autonomous timer\nquiet-period checks]
         playback[Audio playback]
     end
@@ -54,6 +54,7 @@ flowchart TB
     subgraph App[Voice-chat application host]
         web[Python web_server.py\nHTTP API :8200]
         sessions[In-memory sessions\nconversation history\nsystem prompt\nreference path\nactivity timestamps]
+        archive[Persistent local archive\nvoice recordings\nLLM JSONL logs]
         policy[Response handling\nno-reply markers\nquiet-time policy\nTTS selection]
         media[Media and file handling\nffmpeg normalization\nper-session WAV/audio files]
         whisperClient[whisper_client.py\nHTTP STT adapter]
@@ -67,7 +68,7 @@ flowchart TB
         qwenModels[Qwen3-TTS model plus mmproj]
     end
 
-    storage[(voices/web/<session>/reference.wav\naudio/<session>/response-*.wav)]
+    storage[(Persistent local archive\nvoices/web/<session>/timestamp-reference.wav\naudio/web/<session>/timestamp-input.wav\naudio/web/<session>/timestamp-response.wav\nlogs/llm/<session>.jsonl\nlogs/sessions/<session>.json)]
 
     user([User]) --> ui
     ui --> vox
@@ -96,6 +97,7 @@ flowchart TB
     qwenProc --> qwenModels
     media --> storage
     sessions --> storage
+    web --> archive
 
     classDef client fill:#e8f1ff,stroke:#3569a8,color:#10243e
     classDef app fill:#eef8ed,stroke:#4d8a4a,color:#183519
@@ -122,8 +124,12 @@ flowchart TB
   alternative.
 - **`llama-server`** is resident and is the only chat-model process in the
   normal browser path.
-- **Session memory is process-local**. Restarting the web server discards
-  conversations, system prompts, timestamps, and active session associations.
+- **Session memory is process-local**, so restarting the web server discards the
+  live conversation state and active session associations. The media and LLM
+  archive is separate and remains on disk for manual inspection or pruning;
+  the session manifest and JSONL records connect it back to the session ID and
+  UTC timestamps. Archive files are not deleted by session expiry, reset, or
+  clear-voice operations.
 
 ## 3. Sequence — normal VOX turn
 
@@ -140,14 +146,13 @@ sequenceDiagram
 
     User->>Browser: Open `/` and speak
     Browser->>Browser: Start VOX automatically
-    Browser->>Browser: RMS/VAD detects onset
-    Browser->>Browser: Buffer pre-roll and speech
-    Browser->>Browser: Wait for trailing silence
-    Browser->>Browser: Hold 1.8-second continuation window
-    alt Speech resumes
-        Browser->>Browser: Extend same MediaRecorder segment
-    else Still silent or 30-second cap
-        Browser->>Web: POST /api/voice-turn with combined audio segment
+    Browser->>Browser: Silero VAD detects speech probability
+    Browser->>Browser: Retain 800 ms pre-speech padding
+    Browser->>Browser: Wait 2 seconds below the end threshold
+    alt Speech resumes during redemption period
+        Browser->>Browser: Keep the same PCM segment open
+    else Sustained silence
+        Browser->>Web: POST /api/voice-turn with 16 kHz PCM WAV segment
     end
     Web->>Web: Normalize upload with ffmpeg
     Web->>STT: POST /inference with WAV

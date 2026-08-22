@@ -33,13 +33,13 @@ public internet without authentication and HTTPS.
 ### Minimal conversation VOX mode
 
 After microphone permission is granted, the primary frontend analyzes the
-microphone signal locally and uploads only completed speech segments. It adapts
-to the local noise floor, waits through a short conversational backoff before
-applying about 1.4 seconds of sustained silence, then holds a short 1.8-second
-continuation window before submitting. Speech that resumes in that window is
-folded into the same recording. A single utterance is capped at 30 seconds.
-Empty, silence-only, and short filler-only Whisper transcripts are discarded by
-the web server before the chat model or TTS is called.
+microphone signal locally and uploads only completed speech segments. It uses the local browser audio constraints plus the in-browser Silero VAD v5
+model. Silero uses speech probability, separate start/end thresholds, 800 ms
+pre-speech padding, a 2-second redemption period for natural pauses, and a
+350 ms minimum speech duration. Speech that resumes during the redemption
+period remains part of the same 16 kHz PCM segment rather than being submitted
+as a second turn. Empty, silence-only, and short filler-only Whisper transcripts
+are still discarded by the web server before the chat model or TTS is called.
 
 VOX is half-duplex: it releases microphone capture while the assistant's reply
 plays, then arms itself again. The browser also makes recurring autonomous
@@ -49,8 +49,7 @@ Wake Lock remains best-effort while the HTTPS page is visible.
 
 The application adds a server-owned runtime contract and the fixed
 `DEFAULT_PERSONA` to conversation-mode requests. The persona is not exposed by
-the primary UI and cannot be changed there. Chatterbox Nano and Turbo
-officially document these paralinguistic tags: `[cough]`, `[laugh]`,
+the primary UI and cannot be changed there. Chatterbox Nano and Turbo officially document these paralinguistic tags: `[cough]`, `[laugh]`,
 `[chuckle]`, `[clear throat]`, `[sigh]`, `[shush]`, `[groan]`, `[sniff]`, and
 `[gasp]`. The web server normalizes these supported cues to lowercase before
 storing and sending Chatterbox responses. Do not use arbitrary bracketed
@@ -414,6 +413,26 @@ has no persistent history. Browser session history remains process-local; the
 primary conversation surface uses the fixed default persona, while `/admin/`
 can edit the session persona. The runtime contract is server-owned in either
 case.
+
+The web service also archives the browser activity as local files. Each browser
+session has a random 32-character hexadecimal ID in the `voicechat_session`
+cookie, and the ID is included in the relevant directory and log filenames:
+
+```text
+voices/web/<session-id>/<UTC-timestamp>-reference-<random>.wav
+audio/web/<session-id>/<UTC-timestamp>-input-<random>.wav
+audio/web/<session-id>/<UTC-timestamp>-response-<random>.wav
+logs/llm/<session-id>.jsonl
+logs/sessions/<session-id>.json
+```
+
+The normalized clone reference, every normalized input voice recording, every
+TTS output recording, and each LLM turn are retained. LLM JSONL records include
+the UTC timestamp, session ID, turn kind, user/transcribed text, assistant text,
+selected TTS backend, related media paths, and timing data. The session manifest
+links the session ID to its creation timestamp and all three storage locations.
+The server no longer deletes these files when the in-memory session TTL expires;
+manual or later automated pruning is expected.
 
 The web session also supplies a private timing hint after a configurable quiet
 period (`CHAT_SILENCE_CONTEXT_AFTER`, default 10 seconds). Autonomous checks
