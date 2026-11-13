@@ -360,13 +360,24 @@ def service_json(url: str, timeout: float = 1.5) -> dict[str, object]:
         return {"status": "offline", "error": str(error)}
 
 
+def chat_health_url() -> str:
+    # The chat backend is configured by CHAT_BASE_URL everywhere it is actually used, so
+    # health has to read the same variable. Reading CHAT_HOST/CHAT_PORT instead reports a
+    # perfectly healthy llama-server as "offline" the moment it is a cluster service.
+    base = env(
+        "CHAT_BASE_URL",
+        f"http://{env('CHAT_HOST', '127.0.0.1')}:{env('CHAT_PORT', '8088')}/v1",
+    ).rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return f"{base}/health"
+
+
 def services_status() -> dict[str, object]:
-    chat_host = env("CHAT_HOST", "127.0.0.1")
-    chat_port = env("CHAT_PORT", "8088")
     stt_url = env("STT_URL", "http://127.0.0.1:8178").rstrip("/")
     tts_url = env("TTS_URL", "http://127.0.0.1:8190").rstrip("/")
     return {
-        "chat": service_json(f"http://{chat_host}:{chat_port}/health"),
+        "chat": service_json(chat_health_url()),
         "stt": service_json(f"{stt_url}/health"),
         "tts": service_json(f"{tts_url}/health"),
     }
