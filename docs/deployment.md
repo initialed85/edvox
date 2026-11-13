@@ -68,3 +68,9 @@ aborts on a `hip_code_object` assertion (`err == hipSuccess`) before producing a
 which is why the image builds with `GGML_HIP=OFF`. august-desktop's only GPU is a
 GTX 1660 SUPER and 5.7 GB of its 6 GB is held by its own desktop session, so there is
 nothing to offload to either way.
+
+## Measured sizing
+
+[docs/tts-sizing.md](tts-sizing.md) has the numbers from `august-desktop`: peak RSS per
+thread count, KV-quantisation effect, cost per turn, and why the pending RTX 2080 is a
+speed decision rather than a "will it run" decision.
