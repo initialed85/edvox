@@ -559,6 +559,40 @@ def synthesize(
             raise RuntimeError(f"Chatterbox returned an invalid response: {payload!r}")
         if timings is not None and isinstance(payload.get("generation_seconds"), (int, float)):
             timings["tts_model_ms"] = round(float(payload["generation_seconds"]) * 1000, 1)
+    elif backend == "qwen-service":
+        # The resident llama.cpp TTS service keeps the weights loaded between turns,
+        # which is what makes llama.cpp TTS usable in a conversation. It writes into
+        # the shared audio volume, so the path travels the same way Chatterbox's does.
+        url = env("TTS_URL", "http://127.0.0.1:8191").rstrip("/") + "/synthesize"
+        body = {
+            "text": text,
+            "output": str(output),
+            "reference": str(session.reference) if session.reference else "",
+            "lang": env("TTS_LANG", "en"),
+            "frames": int(env("TTS_FRAMES", "512")),
+        }
+        request = urllib.request.Request(
+            url, data=json_bytes(body), headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=float(env("TTS_TIMEOUT", "300"))) as response:
+                payload = json.load(response)
+        except urllib.error.HTTPError as error:
+            detail = error.read().decode(errors="replace")
+            raise RuntimeError(f"Qwen TTS service returned HTTP {error.code}: {detail[-1000:]}") from error
+        if not payload.get("output"):
+            raise RuntimeError(f"Qwen TTS service returned an invalid response: {payload!r}")
+        if timings is not None and isinstance(payload.get("generation_seconds"), (int, float)):
+            timings["tts_model_ms"] = round(float(payload["generation_seconds"]) * 1000, 1)
+            for source, target in (
+                ("prompt_seconds", "tts_prompt_ms"),
+                ("gen_seconds", "tts_generate_ms"),
+                ("vocoder_seconds", "tts_vocoder_ms"),
+            ):
+                if isinstance(payload.get(source), (int, float)):
+                    timings[target] = round(float(payload[source]) * 1000, 1)
+            if isinstance(payload.get("audio_seconds"), (int, float)):
+                timings["tts_audio_seconds"] = round(float(payload["audio_seconds"]), 3)
     elif backend == "qwen":
         command = [
             str(ROOT / "bin" / "llama-tts"),
@@ -736,8 +770,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/session/settings":
                 payload = json.loads(self.read_body())
                 backend = payload.get("backend", session.backend)
-                if backend not in {"qwen", "chatterbox"}:
-                    raise ValueError("backend must be qwen or chatterbox")
+                if backend not in {"qwen", "qwen-service", "chatterbox"}:
+                    raise ValueError("backend must be qwen, qwen-service or chatterbox")
                 persona = str(payload.get("persona", session.persona)).strip()
                 if len(persona) > MAX_TEXT_LENGTH:
                     raise ValueError(f"persona is limited to {MAX_TEXT_LENGTH} characters")
