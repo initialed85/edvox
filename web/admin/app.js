@@ -61,6 +61,23 @@ const state = {
   keepScreenAwake: true,
   wakeLock: null,
   voxPlaybackPaused: false,
+  // sessionStorage gives each browser tab a stable sub-session across reloads
+  // and route changes, without changing the shared cookie-scoped conversation.
+  tabId: (() => {
+    try {
+      const key = 'voicechat_tab_id';
+      let value = sessionStorage.getItem(key);
+      if (!value) {
+        value = crypto.randomUUID();
+        sessionStorage.setItem(key, value);
+      }
+      return value;
+    } catch (_) {
+      return crypto.randomUUID();
+    }
+  })(),
+  visitId: crypto.randomUUID(),
+  pageWasHidden: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -167,10 +184,24 @@ async function releaseWakeLock() {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(path, options);
+  const headers = new Headers(options.headers || {});
+  headers.set('X-Voice-Chat-Tab', state.tabId);
+  const response = await fetch(path, {...options, headers});
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
+}
+
+function presence(stateName, keepalive = false) {
+  return fetch('/api/session/presence', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Voice-Chat-Tab': state.tabId},
+    body: JSON.stringify({state: stateName, tab_id: state.tabId, visit_id: state.visitId}),
+    keepalive,
+  }).then((response) => {
+    if (!response.ok) throw new Error(`Presence update failed (${response.status})`);
+    return response.json();
+  });
 }
 
 function addMessage(role, text, audioUrl = '', timings = null) {
@@ -231,6 +262,7 @@ function renderSession(session) {
 
 async function loadSession() {
   const session = await request('/api/session');
+  await presence('visible');
   renderSession(session);
   const health = await request('/api/health');
   const services = health.services || {};
@@ -726,7 +758,18 @@ window.addEventListener('blur', () => {
   }
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') requestWakeLock().catch(() => {});
+  if (document.visibilityState === 'visible') {
+    requestWakeLock().catch(() => {});
+    if (state.pageWasHidden) state.visitId = crypto.randomUUID();
+    state.pageWasHidden = false;
+    presence('visible').catch(() => {});
+  } else {
+    state.pageWasHidden = true;
+    presence('away', true).catch(() => {});
+  }
+});
+window.addEventListener('pagehide', () => {
+  presence('away', true).catch(() => {});
 });
 window.addEventListener('beforeunload', () => {
   if (state.voxEnabled) disableVox();

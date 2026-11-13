@@ -47,6 +47,16 @@ quiet-period checks, including on a fresh session, and the model may return
 `<NO_REPLY>`. Checks pause while recording, processing, or speaking. Screen
 Wake Lock remains best-effort while the HTTPS page is visible.
 
+The browser keeps a separate tab/visit identity in `sessionStorage` while
+sharing the normal cookie-scoped conversation. It reports when a tab becomes
+hidden or visible, allowing the server to measure how long the user was away.
+After VOX has loaded and settled, the minimal `/` surface makes one hidden
+return-greeting request for that visit. The model receives the away duration as
+private context and produces a brief phone-call-style greeting with audio; the
+context is also available to the next ordinary turn if the user speaks first.
+Repeated visibility events and refresh races are de-duplicated, and the
+return event is archived as a `return-greeting` LLM record.
+
 The application adds a server-owned runtime contract and the fixed
 `DEFAULT_PERSONA` to conversation-mode requests. The persona is not exposed by
 the primary UI and cannot be changed there. Chatterbox Nano and Turbo officially document these paralinguistic tags: `[cough]`, `[laugh]`,
@@ -245,7 +255,10 @@ Stop only a server started by the background launcher:
 The chat server launcher defaults to localhost for safety. Set
 `CHAT_HOST=0.0.0.0` only if the chat API itself must be reachable from another
 machine; the browser frontend does not need this because it proxies chat,
-Whisper, and TTS locally. The first launch can take time
+Whisper, and TTS locally. Each chat completion also carries the stable
+cookie-backed web session identifier in the `X-Voice-Chat-Session-ID` HTTP
+header, allowing an upstream wrapper to associate requests with the same
+conversation/persona/voice session. The first launch can take time
 to map the model; later launches reuse the local Hugging Face cache.
 
 Useful server tuning variables:
@@ -438,7 +451,10 @@ The web session also supplies a private timing hint after a configurable quiet
 period (`CHAT_SILENCE_CONTEXT_AFTER`, default 10 seconds). Autonomous checks
 repeat every `CHAT_AUTONOMOUS_INTERVAL` seconds, defaulting to the same
 10-second value. If the model returns `<NO_REPLY>`, the web frontend skips TTS
-and displays no assistant bubble.
+and displays no assistant bubble. Tab return presence and greeting metadata
+are in-memory coordination state; the resulting greeting and measured
+`away_seconds`/`away_duration` are included in the retained per-session LLM
+JSONL archive.
 
 ## One-shot examples
 

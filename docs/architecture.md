@@ -44,6 +44,7 @@ flowchart TB
         admin[Admin UI\nsettings and history]
         vox[VOX detector\ngetUserMedia + Silero VAD]
         auto[Autonomous timer\nquiet-period checks]
+        presence[Tab/visit presence\nhidden/visible duration]
         playback[Audio playback]
     end
 
@@ -73,8 +74,10 @@ flowchart TB
     user([User]) --> ui
     ui --> vox
     ui --> auto
+    ui --> presence
     admin --> vox
     admin --> auto
+    admin --> presence
     playback --> user
 
     ui -->|HTTPS /| caddy
@@ -84,6 +87,8 @@ flowchart TB
     vox -->|speech segment only\nPOST /api/voice-turn| web
     admin -->|text, PTT, settings, voice APIs| web
     auto -->|POST /api/autonomous-turn| web
+    presence -->|POST /api/session/presence| web
+    presence -->|one-shot return greeting after VOX settles| web
     playback <-->|audio URL| web
 
     web --> sessions
@@ -103,7 +108,7 @@ flowchart TB
     classDef app fill:#eef8ed,stroke:#4d8a4a,color:#183519
     classDef service fill:#fff4df,stroke:#b27618,color:#3e2907
     classDef storage fill:#f3eafa,stroke:#8155a6,color:#28143b
-    class ui,admin,vox,auto,playback client
+    class ui,admin,vox,auto,presence,playback client
     class web,sessions,policy,media,whisperClient,qwenProc app
     class llama,whisper,chatter,qwenModels,caddy service
     class storage storage
@@ -111,12 +116,14 @@ flowchart TB
 
 ### Runtime boundaries
 
-- **Browser** owns microphone permission, local VOX analysis, recording, the
-  autonomous timer, and playback. The primary `/` client is locked to VOX and
-  the fixed default persona; `/admin/` exposes the operational controls. Neither
-  client calls model services directly.
-- **`web_server.py`** owns cookie-scoped sessions, history, prompts, quiet-time
-  eligibility, no-reply handling, media conversion, and orchestration.
+- **Browser** owns microphone permission, local VOX analysis, recording, tab/visit
+  presence, the autonomous timer, and playback. The primary `/` client is locked
+  to VOX and the fixed default persona; `/admin/` exposes the operational
+  controls. Neither client calls model services directly.
+- **`web_server.py`** owns cookie-scoped sessions, history, prompts, tab return
+  duration, quiet-time eligibility, no-reply handling, media conversion, and
+  orchestration. A return greeting is a one-shot autonomous-style turn tied to
+  a browser visit; its private duration context is archived with the turn.
 - **Whisper** is resident and receives normalized audio through its HTTP
   `/inference` endpoint.
 - **Chatterbox** is resident and keeps the loaded TTS model and processed voice
@@ -145,7 +152,16 @@ sequenceDiagram
     participant Store as Session/audio files
 
     User->>Browser: Open `/` and speak
+    Browser->>Web: Announce tab/visit visible
     Browser->>Browser: Start VOX automatically
+    Browser->>Browser: Wait for detector calibration/settling
+    Browser->>Web: POST /api/return-greeting with tab and visit IDs
+    Web->>Chat: Private return context with away duration
+    Chat-->>Web: Brief greeting
+    Web->>TTS: Synthesize greeting
+    TTS-->>Web: WAV output
+    Web-->>Browser: Greeting audio URL
+    Browser->>Browser: Play greeting, then arm VOX
     Browser->>Browser: Silero VAD detects speech probability
     Browser->>Browser: Retain 800 ms pre-speech padding
     Browser->>Browser: Wait 2 seconds below the end threshold
@@ -195,6 +211,7 @@ sequenceDiagram
     participant TTS as Chatterbox or Qwen
 
     User->>Browser: Open `/` or complete a text/voice turn
+    Browser->>Web: Announce tab visible/away transitions
     Browser->>Browser: Start or reset timer; remain armed if VOX is enabled
     loop Every autonomous interval after the quiet threshold
         Browser->>Browser: Timer fires while page is open
@@ -219,8 +236,8 @@ sequenceDiagram
             end
         end
     end
-    User->>Browser: Speak again, or use `/admin/` to type
-    Browser->>Web: Normal voice-turn or admin chat request
+    User->>Browser: Return to the tab or speak again, or use `/admin/` to type
+    Browser->>Web: Visible presence, return greeting, or normal voice/chat request
     Browser->>Browser: Reset autonomous schedule
 ```
 

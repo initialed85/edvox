@@ -1,0 +1,66 @@
+# syntax=docker/dockerfile:1
+#
+# edvox-whisper - resident whisper.cpp STT service.
+#
+# edvox already preferred this shape on the Mac: src/whisper_client.py posts to
+# http://127.0.0.1:8178/inference (a resident whisper-server) and only falls back to
+# spawning whisper-cli per turn when the server is unreachable. Containerizing the
+# resident form is the same design, with the model on disk instead of a login
+# session's cache directory.
+#
+# base.en rather than a multilingual base: the fallback path in src/web_server.py
+# names ggml-base.en.bin, English is the language of this household's voice traffic,
+# and a language-specific model is both faster and less prone to transcribing speech
+# into the wrong language than the multilingual one.
+#
+# The shared objects are staged through /out by a find rather than copied out of a
+# guessed directory: whisper.cpp puts executables in build/bin and its libraries in
+# build/src and build/ggml/src, which is exactly the kind of detail that changes
+# between releases and turns a COPY glob into a build that fails at 03:40.
+
+FROM ubuntu:26.04 AS build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG WHISPER_REF=v1.9.5
+RUN git clone --filter=blob:none --branch "${WHISPER_REF}" https://github.com/ggml-org/whisper.cpp.git /src/whisper.cpp
+
+# Same portability reasoning as the TTS image: this builds on one CPU and runs on
+# another, so no -march=native. OpenCL off - there is no OpenCL device on the node
+# this runs on, and a build that reaches for one only adds a failure mode.
+RUN cmake -B /src/whisper.cpp/build -S /src/whisper.cpp \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON \
+      -DGGML_NATIVE=OFF \
+      -DGGML_CUDA=OFF -DGGML_METAL=OFF -DGGML_OPENCL=OFF -DGGML_HIP=OFF \
+      -DWHISPER_CURL=OFF -DWHISPER_BUILD_SERVER=ON -DWHISPER_BUILD_TESTS=OFF \
+ && cmake --build /src/whisper.cpp/build -j"$(nproc)" \
+ && mkdir -p /out/bin /out/lib \
+ && cp -a /src/whisper.cpp/build/bin/whisper-server /out/bin/ \
+ && cp -a /src/whisper.cpp/build/bin/whisper-cli /out/bin/ \
+ && find /src/whisper.cpp/build \( -name 'libwhisper.so*' -o -name 'libggml*.so*' \) -exec cp -aL {} /out/lib/ \; \
+ && ls -l /out/bin /out/lib
+
+FROM ubuntu:26.04
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /srv/edvox
+
+COPY --from=build /out/bin/whisper-server /srv/edvox/bin/whisper-server
+COPY --from=build /out/bin/whisper-cli    /srv/edvox/bin/whisper-cli
+COPY --from=build /out/lib/               /usr/local/lib/
+COPY ./docker/entrypoint-whisper.sh       /srv/edvox/entrypoint.sh
+
+# ldconfig rather than an rpath: the libraries land on the default search path, so a
+# debug session inside the pod resolves them exactly the way the server does.
+RUN ldconfig && chmod +x /srv/edvox/entrypoint.sh /srv/edvox/bin/* \
+ && ls -l /usr/local/lib /srv/edvox/bin
+
+STOPSIGNAL SIGTERM
+CMD ["/srv/edvox/entrypoint.sh"]

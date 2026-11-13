@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1
+#
+# edvox-web - the browser front end and turn orchestrator.
+#
+# src/web_server.py is deliberately stdlib-only (http.server, urllib, subprocess),
+# so this image carries python3 and ffmpeg and nothing else. ffmpeg is not optional:
+# uploaded voice references are normalized to 16 kHz mono WAV before the TTS backend
+# sees them, and session audio is transcoded for the browser.
+#
+# WORKDIR must be /app/edvox because web_server.py derives its data roots from its
+# own location (ROOT = parents[1]), and the TTS service writes into those same paths
+# through the shared volume. Moving the app would silently move the audio contract.
+
+FROM ubuntu:26.04
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      python3 ffmpeg curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app/edvox
+
+COPY ./src /app/edvox/src
+COPY ./web /app/edvox/web
+
+# The volume mounts land on these three; creating them keeps a pod whose volume has
+# not been populated yet from failing on a missing directory.
+RUN mkdir -p /app/edvox/audio /app/edvox/voices /app/edvox/logs
+
+ENV PYTHONUNBUFFERED=1 \
+    WEB_HOST=0.0.0.0 \
+    WEB_PORT=8200
+
+STOPSIGNAL SIGTERM
+CMD ["python3", "/app/edvox/src/web_server.py"]

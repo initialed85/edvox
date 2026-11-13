@@ -1,0 +1,94 @@
+# syntax=docker/dockerfile:1
+#
+# edvox-tts - the resident Qwen3-TTS service.
+#
+# llama.cpp's own llama-tts is one-shot: every utterance pays for model load,
+# mmproj load and graph setup. On a CPU-only box that overhead measured 2.4-3.4 s
+# on top of a 6-14 s synthesis, which makes a voice conversation feel broken.
+# native/ttsd.cpp loads the backbone and the codec exactly once and then serves
+# /synthesize from the resident weights, which is the same trick already used for
+# whisper (src/whisper_client.py talks to a resident whisper-server rather than
+# invoking whisper-cli per turn).
+#
+# Built from source rather than copying a published llama.cpp image because the
+# daemon is compiled against this tree's headers and libs, and the two then cannot
+# drift: the image that runs is the tree that was measured.
+#
+# Pinned to the commit the latency figures below were measured on (upstream was
+# b12361 at the time; bump it deliberately and re-measure, because the codec stage
+# is where a regression would hide).
+
+FROM ubuntu:26.04 AS build
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      build-essential cmake git ca-certificates libgomp1 \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG LLAMA_CPP_REF=9b8446b91434e0c0cdc293baf0b29c099eaaa0c7
+RUN git clone --filter=blob:none https://github.com/ggml-org/llama.cpp.git /src/llama.cpp \
+ && git -C /src/llama.cpp checkout "${LLAMA_CPP_REF}"
+
+# GGML_NATIVE=OFF is deliberate. The build machine here is a Ryzen 7 PRO 4750U and
+# the deployment target is a Ryzen 5 5600G; a -march=native build would produce an
+# image that runs fast in one place and faults in the other. llama.cpp dispatches
+# CPU features at runtime, which is the portable option.
+#
+# CUDA/HIP/Metal are off on purpose. llama-tts built against this fleet's ROCm tree
+# aborts on a hip_code_object assertion before it synthesizes a single frame, so a
+# CPU-only build is not just smaller, it is the only build that works here.
+RUN cmake -B /src/llama.cpp/build -S /src/llama.cpp \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=ON \
+      -DGGML_NATIVE=OFF \
+      -DGGML_CUDA=OFF -DGGML_HIP=OFF -DGGML_METAL=OFF -DGGML_SYCL=OFF -DGGML_VULKAN=OFF -DGGML_RPC=OFF \
+      -DLLAMA_CURL=OFF \
+      -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TESTS=OFF \
+      # The unified `llama` binary links the cli and server impl libraries, which the
+      # flags above deliberately do not build. It is not needed here; ttsd is.
+      -DLLAMA_BUILD_APP=OFF \
+      -DLLAMA_BUILD_COMMON=ON -DLLAMA_BUILD_TOOLS=ON \
+ && cmake --build /src/llama.cpp/build -j"$(nproc)"
+
+COPY ./native/ttsd.cpp /src/edvox/native/ttsd.cpp
+RUN g++ -std=c++17 -O2 -o /src/edvox/ttsd /src/edvox/native/ttsd.cpp \
+      -I/src/llama.cpp/include \
+      -I/src/llama.cpp/ggml/include \
+      -I/src/llama.cpp \
+      -I/src/llama.cpp/tools \
+      -I/src/llama.cpp/tools/mtmd \
+      -I/src/llama.cpp/common \
+      -L/src/llama.cpp/build/bin \
+      -lllama -lllama-common -lmtmd -lggml -lggml-base
+
+# Collect the shared objects by name wherever the build happened to place them, and
+# resolve them with -L, so a llama.cpp layout change costs a rebuild rather than a
+# pod stuck in CrashLoopBackOff with "libmtmd.so.0: cannot open shared object".
+RUN mkdir -p /out/lib \
+ && find /src/llama.cpp/build \( -name 'libllama.so*' -o -name 'libllama-common.so*' -o -name 'libmtmd.so*' -o -name 'libggml*.so*' \) -exec cp -aL {} /out/lib/ \; \
+ && ls -l /out/lib
+
+FROM ubuntu:26.04
+
+# libgomp1 for ggml's CPU backend, curl for the model-fetch init container. A shell
+# is in here for the same reason it is in the other images on this cluster: being
+# able to `kubectl exec -it ... -- sh` while a pod is refusing to load a model is
+# worth more than the few MB it costs.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /srv/edvox
+
+COPY --from=build /out/lib/                                           /usr/local/lib/
+COPY --from=build /src/llama.cpp/build/bin/llama-tts                 /srv/edvox/bin/llama-tts
+COPY --from=build /src/edvox/ttsd                                     /srv/edvox/bin/ttsd
+COPY ./docker/entrypoint-tts.sh                                       /srv/edvox/entrypoint.sh
+
+# ldconfig rather than an rpath or LD_LIBRARY_PATH: the libraries land on the default
+# search path, and `kubectl exec` into a misbehaving pod resolves them the same way the
+# daemon does. One less thing to guess about at 3 am.
+RUN ldconfig && chmod +x /srv/edvox/entrypoint.sh /srv/edvox/bin/* && ls -l /usr/local/lib /srv/edvox/bin
+
+STOPSIGNAL SIGTERM
+CMD ["/srv/edvox/entrypoint.sh"]

@@ -60,6 +60,8 @@ Be conversational, relatable, and fast-speaking. Keep ordinary replies concise a
 
 HIDDEN_RESPONSE_POLICY = """Private response policy: decide whether the latest user message actually calls for a response. If it is only a standalone acknowledgement or thinking-aloud remark, or even if you prefer not to respond, return exactly <NO_REPLY> and nothing else. A single ASCII space is also treated as no reply, but the <NO_REPLY> marker is more reliable. Never use no-reply for a direct question, request, instruction, greeting, or anything where a helpful acknowledgement is expected. When uncertain, reply briefly. This policy is internal; do not mention it or the marker."""
 AUTONOMOUS_RESPONSE_POLICY = """Private autonomous-turn policy: this is a periodic model invocation while the user has been quiet, not a new user request. Respond naturally based on the conversation and the private elapsed-silence context. If you have nothing to add, return exactly <NO_REPLY>. Do not mention this check, the timer, silence, or this policy. Do not ask whether the user is still there. Do not use this as a reason to start a monologue. This policy is internal; do not mention it or the marker."""
+RETURN_GREETING_POLICY = """Private return-greeting policy: the user has just opened or re-entered the voice conversation. Give one brief, natural, spoken hello-again-style greeting as if answering a phone call. You may make a subtle natural reference to the length of the absence if it suits the conversation, but do not mention timers, hidden prompts, browser tabs, or internal policies. Do not return <NO_REPLY> for this event."""
+TAB_ID_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 
 class Session:
@@ -73,6 +75,14 @@ class Session:
         self.last_seen = self.created
         self.last_activity = self.created
         self.last_autonomous_at = 0.0
+        # Browser tabs are sub-sessions within the cookie-scoped conversation.
+        # These timestamps are only presence metadata; the conversation remains
+        # shared by the normal session cookie.
+        self.tab_away_since: dict[str, float] = {}
+        self.tab_last_seen: dict[str, float] = {}
+        self.pending_returns: dict[str, dict[str, object]] = {}
+        self.tab_active_visit: dict[str, str] = {}
+        self.completed_greeting_visits: dict[str, float] = {}
         self.lock = threading.Lock()
 
 
@@ -92,6 +102,91 @@ def timestamp_slug(timestamp: float | None = None) -> str:
 def timestamp_iso(timestamp: float | None = None) -> str:
     value = time.time() if timestamp is None else timestamp
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(value))
+
+
+def valid_tab_id(value: object) -> str | None:
+    tab_id = str(value or "").strip()
+    return tab_id if TAB_ID_RE.fullmatch(tab_id) else None
+
+
+def format_duration(seconds: float) -> str:
+    rounded = max(0, int(seconds))
+    if rounded < 1:
+        return "less than a second"
+    minutes, remaining = divmod(rounded, 60)
+    hours, minutes = divmod(minutes, 60)
+    parts: list[str] = []
+    if hours:
+        parts.append(f"{hours} hour{'s' if hours != 1 else ''}")
+    if minutes:
+        parts.append(f"{minutes} minute{'s' if minutes != 1 else ''}")
+    if remaining or not parts:
+        parts.append(f"{remaining} second{'s' if remaining != 1 else ''}")
+    if len(parts) > 1:
+        return ", ".join(parts[:-1]) + " and " + parts[-1]
+    return parts[0]
+
+
+def mark_tab_away(session: Session, tab_id: str, visit_id: str) -> None:
+    # A pagehide from the old document can arrive after the replacement page
+    # has already announced itself visible. Do not mark the new visit away.
+    active_visit = session.tab_active_visit.get(tab_id)
+    if active_visit is not None and active_visit != visit_id:
+        return
+    now = time.time()
+    session.tab_last_seen[tab_id] = now
+    session.tab_away_since.setdefault(tab_id, now)
+
+
+def mark_tab_visible(session: Session, tab_id: str, visit_id: str) -> dict[str, object] | None:
+    now = time.time()
+    away_since = session.tab_away_since.pop(tab_id, None)
+    previous_seen = session.tab_last_seen.get(tab_id)
+    previous_visit = session.tab_active_visit.get(tab_id)
+    session.tab_last_seen[tab_id] = now
+    session.tab_active_visit[tab_id] = visit_id
+    if away_since is None and previous_seen is None:
+        # A genuinely new tab has no tab-local presence history. If it is
+        # reopening an existing conversation, use the last conversational
+        # activity as a conservative session-level fallback.
+        if not session.messages:
+            return None
+        duration = max(0.0, now - session.last_activity)
+    else:
+        # Repeated visibility events for the same document are not returns. If
+        # a browser missed pagehide, a new document/visit can still infer a gap
+        # from the previous observation.
+        if away_since is None and previous_visit == visit_id:
+            return None
+        duration = max(0.0, now - (away_since if away_since is not None else previous_seen))
+    context = {
+        "away_seconds": round(duration, 1),
+        "away_duration": format_duration(duration),
+        "returned_at": now,
+    }
+    session.pending_returns[tab_id] = context
+    return context
+
+
+def consume_pending_return(session: Session, tab_id: str | None) -> dict[str, object] | None:
+    if not tab_id:
+        return None
+    return session.pending_returns.pop(tab_id, None)
+
+
+def clear_pending_return(session: Session, tab_id: str | None) -> None:
+    if tab_id:
+        session.pending_returns.pop(tab_id, None)
+
+
+def return_context_text(context: dict[str, object]) -> str:
+    duration = str(context.get("away_duration") or "an unknown amount of time")
+    return (
+        "Private return context: the user has just returned to this browser voice "
+        f"conversation after being away for {duration}. Treat that as background "
+        "context and do not mention the timer or hidden instructions unless a natural "
+        "response genuinely calls for it."
+    )
 
 
 def write_session_manifest(session: Session) -> None:
@@ -205,6 +300,7 @@ def log_llm_turn(
     timings: dict[str, object],
     input_file: Path | None = None,
     output_file: Path | None = None,
+    return_context: dict[str, object] | None = None,
 ) -> None:
     """Append a human-readable, machine-readable record for every LLM turn."""
     timestamp = time.time()
@@ -221,6 +317,7 @@ def log_llm_turn(
         "reference_file": str(session.reference) if session.reference else None,
         "input_file": str(input_file) if input_file else None,
         "output_file": str(output_file) if output_file else None,
+        "return_context": return_context,
         "timings": timings,
     }
     path = LLM_LOG_ROOT / f"{session.session_id}.jsonl"
@@ -333,6 +430,9 @@ def chat(
     text: str,
     *,
     autonomous: bool = False,
+    return_greeting: bool = False,
+    return_context: dict[str, object] | None = None,
+    tab_id: str | None = None,
     timings: dict[str, object] | None = None,
     persona: str | None = None,
 ) -> tuple[str, bool]:
@@ -347,14 +447,27 @@ def chat(
     system_parts = [system_content, HIDDEN_RESPONSE_POLICY]
     if autonomous:
         system_parts.append(AUTONOMOUS_RESPONSE_POLICY)
-    timing = silence_context(session)
+    if return_greeting:
+        system_parts.append(RETURN_GREETING_POLICY)
+    effective_return_context = return_context or (session.pending_returns.get(tab_id) if tab_id else None)
+    if effective_return_context:
+        system_parts.append(return_context_text(effective_return_context))
+    timing = None if return_greeting else silence_context(session)
     if timing:
         system_parts.append(timing["content"])
     messages[0]["content"] = "\n\n".join(system_parts)
-    prompt = text if not autonomous else (
-        "Private event: this is a periodic check while the conversation is quiet. "
-        "Respond naturally if you have something to say; otherwise return <NO_REPLY>."
-    )
+    if return_greeting:
+        prompt = (
+            "Private event: the user has just returned to the voice conversation. "
+            "Give the brief greeting now."
+        )
+    elif not autonomous:
+        prompt = text
+    else:
+        prompt = (
+            "Private event: this is a periodic check while the conversation is quiet. "
+            "Respond naturally if you have something to say; otherwise return <NO_REPLY>."
+        )
     messages.append({"role": "user", "content": prompt})
     body = {
         "model": env("CHAT_MODEL", "unsloth/Qwen3.6-35B-A3B-MTP-GGUF:UD-Q4_K_XL"),
@@ -373,7 +486,12 @@ def chat(
     request = urllib.request.Request(
         env("CHAT_BASE_URL", "http://127.0.0.1:8088/v1").rstrip("/") + "/chat/completions",
         data=json_bytes(body),
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            # Keep the wrapper-facing identity tied to the same cookie-backed
+            # session that owns this conversation, persona, and voice state.
+            "X-Voice-Chat-Session-ID": session.session_id,
+        },
         method="POST",
     )
     try:
@@ -671,6 +789,96 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(200, public_session(session))
                 return
 
+            if path == "/api/session/presence":
+                payload = json.loads(self.read_body())
+                tab_id = valid_tab_id(payload.get("tab_id") or self.headers.get("X-Voice-Chat-Tab"))
+                visit_id = valid_tab_id(payload.get("visit_id"))
+                if not tab_id or not visit_id:
+                    raise ValueError("valid browser tab and visit ids are required")
+                presence = str(payload.get("state", "visible")).lower()
+                if presence not in {"away", "visible"}:
+                    raise ValueError("presence state must be away or visible")
+                with session.lock:
+                    if presence == "away":
+                        mark_tab_away(session, tab_id, visit_id)
+                        context = None
+                    else:
+                        context = mark_tab_visible(session, tab_id, visit_id)
+                self.send_json(200, {
+                    "state": presence,
+                    "returned": context is not None,
+                    "away_seconds": context.get("away_seconds") if context else None,
+                    "away_duration": context.get("away_duration") if context else None,
+                })
+                return
+
+            if path == "/api/return-greeting":
+                payload = json.loads(self.read_body())
+                tab_id = valid_tab_id(payload.get("tab_id") or self.headers.get("X-Voice-Chat-Tab"))
+                visit_id = valid_tab_id(payload.get("visit_id"))
+                if not tab_id or not visit_id:
+                    raise ValueError("valid browser tab and visit ids are required")
+                request_started = time.perf_counter()
+                timings: dict[str, object] = {}
+                with session.lock:
+                    if visit_id in session.completed_greeting_visits:
+                        self.send_json(200, {"skipped": True, "reason": "return-greeting-already-requested", "session": public_session(session)})
+                        return
+                    session.completed_greeting_visits[visit_id] = time.time()
+                    # Presence is announced separately by the browser before
+                    # this request. Consume only that visit's pending context;
+                    # do not mark the tab visible again or the measured gap
+                    # would collapse to nearly zero.
+                    # Leave the context in the pending map until chat() has
+                    # completed successfully; its normal cleanup then consumes
+                    # it. A failed greeting can therefore be retried without
+                    # losing the measured absence.
+                    return_context = session.pending_returns.get(tab_id)
+                    try:
+                        reply, no_reply = chat(
+                            session,
+                            "",
+                            autonomous=True,
+                            return_greeting=True,
+                            return_context=return_context,
+                            tab_id=tab_id,
+                            timings=timings,
+                            persona=DEFAULT_PERSONA if self.conversation_mode() else None,
+                        )
+                        audio_url = None if no_reply else synthesize(session, reply, timings=timings)
+                        clear_pending_return(session, tab_id)
+                        # A return greeting is itself an autonomous event; do
+                        # not immediately fire another quiet-period check.
+                        session.last_autonomous_at = time.time()
+                        set_last_assistant_timings(session, timings)
+                    except Exception:
+                        session.completed_greeting_visits.pop(visit_id, None)
+                        raise
+                    timings["total_ms"] = elapsed_ms(request_started)
+                    log_llm_turn(
+                        session,
+                        kind="return-greeting",
+                        user_text="",
+                        assistant_text=reply,
+                        no_reply=no_reply,
+                        timings=timings,
+                        output_file=(AUDIO_ROOT / session.session_id / Path(audio_url).name) if audio_url else None,
+                        return_context=return_context,
+                    )
+                    log_timings("return-greeting", timings)
+                    self.send_json(200, {
+                        "skipped": False,
+                        "return_greeting": True,
+                        "reply": reply,
+                        "no_reply": no_reply,
+                        "audio_url": audio_url,
+                        "away_seconds": return_context.get("away_seconds") if return_context else None,
+                        "away_duration": return_context.get("away_duration") if return_context else None,
+                        "timings": timings,
+                        "session": public_session(session),
+                    })
+                return
+
             if path == "/api/autonomous-turn":
                 with session.lock:
                     request_started = time.perf_counter()
@@ -699,10 +907,12 @@ class Handler(BaseHTTPRequestHandler):
                             session,
                             "",
                             autonomous=True,
+                            tab_id=valid_tab_id(self.headers.get("X-Voice-Chat-Tab")),
                             timings=timings,
                             persona=DEFAULT_PERSONA if self.conversation_mode() else None,
                         )
                         audio_url = None if no_reply else synthesize(session, reply, timings=timings)
+                        clear_pending_return(session, valid_tab_id(self.headers.get("X-Voice-Chat-Tab")))
                         set_last_assistant_timings(session, timings)
                     except Exception:
                         session.last_autonomous_at = 0.0
@@ -740,10 +950,12 @@ class Handler(BaseHTTPRequestHandler):
                     reply, no_reply = chat(
                         session,
                         text,
+                        tab_id=valid_tab_id(self.headers.get("X-Voice-Chat-Tab")),
                         timings=timings,
                         persona=DEFAULT_PERSONA if self.conversation_mode() else None,
                     )
                     audio_url = None if no_reply else synthesize(session, reply, timings=timings)
+                    clear_pending_return(session, valid_tab_id(self.headers.get("X-Voice-Chat-Tab")))
                     timings["total_ms"] = elapsed_ms(request_started)
                     set_last_assistant_timings(session, timings)
                     log_llm_turn(
@@ -793,10 +1005,12 @@ class Handler(BaseHTTPRequestHandler):
                             reply, no_reply = chat(
                                 session,
                                 transcript,
+                                tab_id=valid_tab_id(self.headers.get("X-Voice-Chat-Tab")),
                                 timings=timings,
                                 persona=DEFAULT_PERSONA if self.conversation_mode() else None,
                             )
                             audio_url = None if no_reply else synthesize(session, reply, timings=timings)
+                            clear_pending_return(session, valid_tab_id(self.headers.get("X-Voice-Chat-Tab")))
                             timings["total_ms"] = elapsed_ms(request_started)
                             set_last_assistant_timings(session, timings)
                             log_llm_turn(

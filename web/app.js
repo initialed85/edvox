@@ -29,6 +29,22 @@ const state = {
   autonomousTimer: null,
   autonomousInFlight: false,
   wakeLock: null,
+  tabId: (() => {
+    try {
+      const key = 'voicechat_tab_id';
+      let value = sessionStorage.getItem(key);
+      if (!value) {
+        value = crypto.randomUUID();
+        sessionStorage.setItem(key, value);
+      }
+      return value;
+    } catch (_) {
+      return crypto.randomUUID();
+    }
+  })(),
+  visitId: crypto.randomUUID(),
+  returnGreetingPending: true,
+  pageWasHidden: false,
 };
 
 const orb = document.getElementById('status-orb');
@@ -50,10 +66,55 @@ function showError(error) {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(path, options);
+  const headers = new Headers(options.headers || {});
+  headers.set('X-Voice-Chat-Tab', state.tabId);
+  const response = await fetch(path, {...options, headers});
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || `Request failed (${response.status})`);
   return payload;
+}
+
+function presence(stateName, keepalive = false) {
+  return fetch('/api/session/presence', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-Voice-Chat-Tab': state.tabId},
+    body: JSON.stringify({state: stateName, tab_id: state.tabId, visit_id: state.visitId}),
+    keepalive,
+  }).then((response) => {
+    if (!response.ok) throw new Error(`Presence update failed (${response.status})`);
+    return response.json();
+  });
+}
+
+async function requestReturnGreeting() {
+  if (!state.returnGreetingPending || !state.voxEnabled || state.busy || state.voxPhase !== 'active') return;
+  state.returnGreetingPending = false;
+  let paused = false;
+  try {
+    paused = await pauseVoxForWork();
+    setPhase('processing', 'Checking in…');
+    const result = await request('/api/return-greeting', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Voice-Chat-Mode': 'conversation',
+        'X-Voice-Chat-Tab': state.tabId,
+      },
+      body: JSON.stringify({tab_id: state.tabId, visit_id: state.visitId}),
+    });
+    if (!result.skipped && !result.no_reply && result.audio_url) {
+      setPhase('speaking', 'Speaking…');
+      await waitForPlayback(new Audio(result.audio_url));
+    }
+  } catch (error) {
+    state.returnGreetingPending = true;
+    showError(error);
+  } finally {
+    if (paused && state.voxEnabled) await resumeVoxAfterWork();
+    if (state.voxEnabled && state.voxPhase !== 'error') setPhase('active', 'Listening…');
+    if (state.returnGreetingPending) setTimeout(() => void requestReturnGreeting(), 0);
+    scheduleAutonomousCheck();
+  }
 }
 
 function microphoneError(error) {
@@ -194,6 +255,9 @@ async function waitForPlayback(audio) {
 
 async function handleAudio(audioSamples) {
   if (state.busy || !state.voxEnabled) return;
+  // If the user speaks before the startup greeting gets dispatched, let the
+  // normal response carry the return context instead of greeting afterwards.
+  state.returnGreetingPending = false;
   const paused = await pauseVoxForWork();
   try {
     const form = new FormData();
@@ -214,12 +278,17 @@ async function handleAudio(audioSamples) {
     if (paused && state.voxEnabled) await resumeVoxAfterWork();
     else state.busy = false;
     if (state.voxEnabled && state.voxPhase !== 'error') setPhase('active', 'Listening…');
+    if (state.returnGreetingPending) setTimeout(() => void requestReturnGreeting(), 0);
     scheduleAutonomousCheck();
   }
 }
 
 async function runAutonomousCheck() {
   state.autonomousTimer = null;
+  if (state.returnGreetingPending) {
+    requestReturnGreeting();
+    return;
+  }
   if (state.busy || !state.voxEnabled || state.voxPhase !== 'active' || state.autonomousInFlight) return;
   state.autonomousInFlight = true;
   let paused = false;
@@ -238,6 +307,7 @@ async function runAutonomousCheck() {
   } finally {
     state.autonomousInFlight = false;
     if (paused && state.voxEnabled) await resumeVoxAfterWork();
+    if (state.returnGreetingPending) setTimeout(() => void requestReturnGreeting(), 0);
     scheduleAutonomousCheck();
   }
 }
@@ -273,6 +343,10 @@ async function enableVox() {
     if (!state.voxEnabled) return;
     setPhase('active', 'Listening…');
     scheduleAutonomousCheck();
+    // Give the detector a short settling period before the one-shot return
+    // greeting. This keeps startup noise from being mistaken for a turn and
+    // makes the greeting feel like the call has just connected.
+    setTimeout(() => void requestReturnGreeting(), 800);
   } catch (error) {
     state.voxEnabled = false;
     await destroyVad();
@@ -304,7 +378,27 @@ orb.addEventListener('click', () => {
   if (!state.voxEnabled) enableVox().catch(showError);
 });
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') requestWakeLock().catch(() => {});
+  if (document.visibilityState === 'visible') {
+    requestWakeLock().catch(() => {});
+    if (state.pageWasHidden) {
+      // A visibility return is a new browser visit within the same tab. This
+      // lets the server measure the hidden interval without changing the
+      // cookie-scoped conversation.
+      state.visitId = crypto.randomUUID();
+      state.returnGreetingPending = true;
+    }
+    state.pageWasHidden = false;
+    presence('visible').then((result) => {
+      if (result.returned) state.returnGreetingPending = true;
+      if (state.returnGreetingPending) setTimeout(() => void requestReturnGreeting(), 0);
+    }).catch(() => {});
+  } else {
+    state.pageWasHidden = true;
+    presence('away', true).catch(() => {});
+  }
+});
+window.addEventListener('pagehide', () => {
+  presence('away', true).catch(() => {});
 });
 window.addEventListener('beforeunload', () => {
   disableVox();
@@ -314,6 +408,7 @@ window.addEventListener('beforeunload', () => {
 async function boot() {
   try {
     const session = await request('/api/session');
+    await presence('visible').catch(() => {});
     state.autonomousAfterSeconds = Number(session.autonomous_after_seconds || 10);
     state.autonomousIntervalSeconds = Number(session.autonomous_interval_seconds || state.autonomousAfterSeconds || 10);
     await request('/api/health');
