@@ -172,7 +172,7 @@ Three questions the numbers cannot answer:
 3. ~~How much `exaggeration` is too much?~~ **Answered: 1.5** is the good breathy chuckle,
    and it does not clip. See correction 6 — the dial gets a peak guard, not a clamp.
 
-### Phase 1 partial result — an open conflict in the two picks
+### Phase 1 — how the picks developed
 
 The first two selections cross runtimes. `04-G07` ("good accent-wise") is **Chatterbox
 GGUF**, the runtime that renders `[chuckle]` as the literal word; `03-tagged-x15` ("good
@@ -180,10 +180,49 @@ breathy laugh chuckle thing") is **Chatterbox Turbo under upstream Python**, the
 runtime that still has the tag vocabulary. The accent that passed and the laugh that passed
 are not currently available from the same server.
 
-`04-X22` settles it: Python Turbo on the *same* line 04 text and reference as `04-G07`,
-with `03-J09` as its tag-line render. If Python Turbo's accent also passes, it is the only
-candidate meeting both requirements and GGUF Chatterbox adds nothing over it. If it does
-not, the accent outranks the tags and the changeover should not proceed.
+### Phase 1 final: the vocabulary and the accent are coupled, and there is no sweet spot
+
+The third candidate runtime was `chatterbox.mtl_tts.ChatterboxMultilingualTTS` — the standard
+repo's second tokenizer (`mtl_tokenizer.json`) plus `t3_mtl23ls_v3.safetensors`, carrying 31
+non-verbal events (`[giggle]`, `[laughter]`, `[guffaw]`, `[sigh]`, `[whisper]`, `[gasp]`,
+`[mumble]`, `[clear_throat]`, `[humming]`, `[singing]`, ...) and an `exaggeration` dial. Its
+tokens render correctly as non-speech — none was read as a word, and the `[giggle]` render
+transcribed as the clean sentence with the sound absorbed into the audio.
+
+It was rejected by ear: **no Australian accent coming through**. It also cost RTF 5.36–7.94
+(19–37 s per line) and mangled content — `Well [laughter], that went…` transcribed as
+"Well, **Turo**, that went…", `[sigh] I suppose that is fine` as "**Datto**, I suppose that
+is fine".
+
+Taken together the three listening verdicts form a pattern worth stating plainly, because it
+predicts future results and it is not a runtime artefact:
+
+| checkpoint | non-verbal vocabulary | accent verdict (Ed) | RTF |
+|---|---|---|---|
+| Chatterbox standard base (GGUF / Python) | **none** | *"really nails it"* | 5.2 / 5.4–9.0 |
+| Chatterbox MTL 23-lang | 31 tokens, renders as non-speech | *"basically no Australian accent"* | 5.4–7.9 |
+| Chatterbox Turbo | 19 tokens, renders as non-speech | *"marginally more British"*; American with the expressive ref | **2.2–2.6** |
+
+**Every checkpoint that gained the paralinguistic vocabulary lost the accent, and every
+checkpoint that keeps the accent has no vocabulary.** Same reference clip, same texts, same
+node throughout — so conditioning material is not the variable and the reference window is
+not the lever. The likely mechanism is that the tag-capable models were trained on a wider,
+mostly non-Australian mixture, and reference-conditioning is too weak to hold an accent
+against that prior. Implication for planning: **the RTX 2080 will not fix this.** GPU buys
+speed, not accent. Closing the gap needs a model that was trained to take paralinguistic
+tags *and* conditions hard on the speaker — i.e. fine-tuning or a purpose-built dataset, not
+another checkpoint from this family.
+
+The practical choice is therefore a straight trade, not a search: Turbo buys expressiveness
+and the only usable CPU speed at the cost of a near-miss accent; standard GGUF buys the
+accent at 2× the latency and no non-verbal sounds.
+
+One accent candidate has still never been judged by ear: **CosyVoice3** (`04-V20`). It is
+slow (RTF 6.8) and was verbose and lossy on line 03, but its control mechanism is an
+`instruct` free-text directive rather than a special-token vocabulary — the only surviving
+candidate where expressiveness does not come from the training mixture that appears to cost
+the accent. It was eliminated on performance before listening, which was a measurement
+ordering decision, not evidence about its accent.
 
 ## If you pick Chatterbox Turbo (Phase 2 shape)
 
