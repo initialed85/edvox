@@ -180,7 +180,10 @@ breathy laugh chuckle thing") is **Chatterbox Turbo under upstream Python**, the
 runtime that still has the tag vocabulary. The accent that passed and the laugh that passed
 are not currently available from the same server.
 
-### Phase 1 final: the vocabulary and the accent are coupled, and there is no sweet spot
+### Phase 1 interim read: every tag-capable checkpoint lost the accent
+
+*(Superseded in part by the section below — `exaggeration` turned out to confound the Turbo
+verdict. The MTL result stands: it was tested at 1.5 as well and had no accent either way.)*
 
 The third candidate runtime was `chatterbox.mtl_tts.ChatterboxMultilingualTTS` — the standard
 repo's second tokenizer (`mtl_tokenizer.json`) plus `t3_mtl23ls_v3.safetensors`, carrying 31
@@ -204,7 +207,8 @@ predicts future results and it is not a runtime artefact:
 | Chatterbox Turbo | 19 tokens, renders as non-speech | *"marginally more British"*; American with the expressive ref | **2.2–2.6** |
 
 **Every checkpoint that gained the paralinguistic vocabulary lost the accent, and every
-checkpoint that keeps the accent has no vocabulary.** Same reference clip, same texts, same
+checkpoint that keeps the accent has no vocabulary.** (This reading was formed before the
+`exaggeration` confound was found — see below.) Same reference clip, same texts, same
 node throughout — so conditioning material is not the variable and the reference window is
 not the lever. The likely mechanism is that the tag-capable models were trained on a wider,
 mostly non-Australian mixture, and reference-conditioning is too weak to hold an accent
@@ -216,6 +220,33 @@ another checkpoint from this family.
 The practical choice is therefore a straight trade, not a search: Turbo buys expressiveness
 and the only usable CPU speed at the cost of a near-miss accent; standard GGUF buys the
 accent at 2× the latency and no non-verbal sounds.
+
+### This was later revised: `exaggeration` was confounding the accent verdict
+
+The "marginally more British" and "basically standard American" verdicts on the idiom line
+were heard at the library default `exaggeration=0.5`. Re-rendering line 04 at Ed's chosen
+`1.5` with the same reference and the tag present (`scripts/turbo_preflight.py`,
+`samples/ab/preflight/04-idiom-x15-tagged.wav`) passes on both counts — full idiom intact
+*and* the tag absorbed as non-speech:
+
+| render | exaggeration | whisper transcription | tag heard as word? |
+|---|---|---|---|
+| line 04 plain | 0.5 | "Yeah, now she'll be right. We'll grab a **sapphire pie** and sort it out after the **art vote**." | n/a |
+| line 04 plain | 1.5 | "Yeah, no, sure be right. We'll grab a **servo pie** and sort it out after the **arvo**." | n/a |
+| **line 04 + `[chuckle]`** | **1.5** | "Yeah, nah, should be right. We'll grab a **servo pie** and sort it out after the **arvo**." | **no** |
+| line 07 + `[chuckle]` | 1.5 | "So I let me catch that, could you set rails?" | no, but garbled |
+
+Counter-intuitively, articulation is **better** at 1.5 than at the 0.5 default: the low
+setting mangled "servo pie" into "sapphire pie" and "arvo" into "art vote", which is what a
+flattened delivery sounds like to the STT. So the accent problem was at least partly a
+delivery-setting problem, and the trade framed above is narrower than it looked — Turbo at
+`exaggeration=1.5` gets the idiom *and* the non-verbal sound, on the only candidate that runs
+at usable CPU speed (RTF 1.96–2.52).
+
+Not everything holds: `07-plain-x15-tagged` garbled a short sentence that rendered cleanly
+without the tag, so tag placement on brief replies is unreliable and needs a policy rather
+than blanket use. Peaks in this batch stayed ≤ 0.918 at `1.5`, but 1.015 was measured
+earlier at the same setting, so the peak guard remains mandatory.
 
 One accent candidate has still never been judged by ear: **CosyVoice3** (`04-V20`). It is
 slow (RTF 6.8) and was verbose and lossy on line 03, but its control mechanism is an
