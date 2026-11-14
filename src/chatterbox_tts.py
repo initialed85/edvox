@@ -35,9 +35,13 @@ def main() -> int:
 
     print(f"Loading Chatterbox {args.model.title()} on {device}...", file=sys.stderr)
     started = time.monotonic()
-    model = ChatterboxTurboTTS.from_local(
-        model_dir, device=device, nano=args.model == "nano"
-    )
+    # chatterbox-tts 0.1.7 signature is from_local(ckpt_dir, device); there is no `nano`
+    # flag. Nano and Turbo are selected by which checkpoint directory is passed, and 0.1.7
+    # can only actually load Turbo - ChatterboxTurboTTS hardcodes the turbo T3Config and
+    # opens t3_turbo_v1.safetensors, while the nano repo ships t3_nano_v1.safetensors with
+    # an incompatible state dict (1 of 155 tensors shape-matches). See
+    # docs/tts-phase0-results.md "Corrections to the spec and to our own code".
+    model = ChatterboxTurboTTS.from_local(model_dir, device)
     print(f"Model loaded in {time.monotonic() - started:.1f}s", file=sys.stderr)
 
     reference = args.reference or None
@@ -48,7 +52,11 @@ def main() -> int:
         print(f"Using voice reference: {reference}", file=sys.stderr)
 
     started = time.monotonic()
-    wav = model.generate(args.text, audio_prompt_path=reference)
+    # exaggeration is the expressiveness dial. 0.8 and above clip (measured peak 1.005), so
+    # the default stays mid-range and is clamped defensively here.
+    exaggeration = min(max(float(os.environ.get("CHATTERBOX_EXAGGERATION", "0.5")), 0.0), 0.7)
+    wav = model.generate(args.text, audio_prompt_path=reference,
+                         exaggeration=exaggeration)
     output = Path(args.output).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
     ta.save(str(output), wav.detach().cpu(), model.sr)

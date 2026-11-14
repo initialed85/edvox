@@ -1,10 +1,17 @@
 # TTS changeover — specification and execution plan
 
-**Status:** draft, waiting on Phase 0.
+**Status:** Phase 0 complete 2026-11-14 — results in [tts-phase0-results.md](tts-phase0-results.md). Blocked on the Phase 1 listening decision (Ed's).
 **Written:** 2026-11-14, against `edvox` head `622978a`.
 **Audience:** an execution agent with no access to the conversation that produced this
 document. Every fact you need is restated here; read the whole thing before touching
 anything, then follow the phases in order.
+
+> **If you are picking this up after Phase 0: read `docs/tts-phase0-results.md` first.** It
+> corrects several assumptions in this spec — most importantly that audio.cpp keeps voice
+> cloning but *drops* the paralinguistic tag vocabulary (the opposite of trap T1), that
+> Chatterbox Nano cannot be loaded by `chatterbox-tts==0.1.7` at all, that CosyVoice3 needs
+> a 16 kHz reference plus a verbatim reference transcript, and that the `--log` capability
+> flags overstate what inline `[tags]` can do. Do not re-run Phase 0 to rediscover those.
 
 ---
 

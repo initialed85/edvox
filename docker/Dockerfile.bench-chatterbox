@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# CPU wheel first so chatterbox-tts resolves against it and no CUDA build is pulled.
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+RUN pip install "chatterbox-tts==0.1.7" huggingface_hub
+
+WORKDIR /app
+COPY src/ /app/src/
+RUN mkdir -p /models /audio

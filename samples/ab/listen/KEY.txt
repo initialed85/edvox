@@ -1,0 +1,26 @@
+# Phase 0 blind listening key. PVC only - do not commit.
+# label	model	line	ref	bytes
+05-A01	cosyvoice3-gguf	05	conv	206444
+04-B02	chatterbox-turbo-gguf	04	conv	253484
+03-C03	cosyvoice3-gguf	03	conv	162284
+01-D04	chatterbox-gguf	01	conv	178604
+03-E05	index-tts2.5-gguf	03	conv	154668
+01-F06	chatterbox-turbo-python	01	conv	330320
+04-G07	chatterbox-gguf	04	conv	236204
+03-H08	chatterbox-turbo-gguf	03	conv	157484
+03-J09	chatterbox-turbo-python	03	conv	341840
+05-K10	chatterbox-turbo-gguf	05	conv	224684
+05-L11	chatterbox-turbo-python	05	conv	407120
+03-M12	qwen3-tts-prod	03	conv	134444
+01-N13	cosyvoice3-gguf	01	conv	206444
+04-P14	qwen3-tts-prod	04	conv	241964
+05-Q15	index-tts2.5-gguf	05	conv	213036
+01-R16	qwen3-tts-prod	01	conv	161324
+05-S17	chatterbox-gguf	05	conv	186284
+01-T18	index-tts2.5-gguf	01	conv	156716
+04-U19	index-tts2.5-gguf	04	conv	209452
+04-V20	cosyvoice3-gguf	04	conv	350444
+05-W21	qwen3-tts-prod	05	conv	207404
+04-X22	chatterbox-turbo-python	04	conv	545360
+03-Y23	chatterbox-gguf	03	conv	147884
+01-Z24	chatterbox-turbo-gguf	01	conv	132524
