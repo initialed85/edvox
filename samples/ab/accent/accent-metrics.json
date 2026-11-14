@@ -1,0 +1,90 @@
+[
+ {
+  "name": "std-03-conv.wav",
+  "model": "std",
+  "line": "03",
+  "ref": "conv",
+  "audio_s": 3.52,
+  "wall_s": 31.55,
+  "rtf": 8.96,
+  "raw_peak": 0.47,
+  "rss_mb": 4498
+ },
+ {
+  "name": "std-03-expr.wav",
+  "model": "std",
+  "line": "03",
+  "ref": "expr",
+  "audio_s": 2.92,
+  "wall_s": 18.64,
+  "rtf": 6.38,
+  "raw_peak": 0.411,
+  "rss_mb": 4650
+ },
+ {
+  "name": "std-04-conv.wav",
+  "model": "std",
+  "line": "04",
+  "ref": "conv",
+  "audio_s": 4.68,
+  "wall_s": 26.68,
+  "rtf": 5.7,
+  "raw_peak": 0.292,
+  "rss_mb": 4729
+ },
+ {
+  "name": "std-04-expr.wav",
+  "model": "std",
+  "line": "04",
+  "ref": "expr",
+  "audio_s": 4.76,
+  "wall_s": 25.77,
+  "rtf": 5.41,
+  "raw_peak": 0.416,
+  "rss_mb": 4682
+ },
+ {
+  "name": "turbo-03-conv.wav",
+  "model": "turbo",
+  "line": "03",
+  "ref": "conv",
+  "audio_s": 2.96,
+  "wall_s": 7.6,
+  "rtf": 2.57,
+  "raw_peak": 0.784,
+  "rss_mb": 4233
+ },
+ {
+  "name": "turbo-03-expr.wav",
+  "model": "turbo",
+  "line": "03",
+  "ref": "expr",
+  "audio_s": 3.2,
+  "wall_s": 7.31,
+  "rtf": 2.29,
+  "raw_peak": 1.015,
+  "rss_mb": 4432
+ },
+ {
+  "name": "turbo-04-conv.wav",
+  "model": "turbo",
+  "line": "04",
+  "ref": "conv",
+  "audio_s": 4.8,
+  "wall_s": 10.67,
+  "rtf": 2.22,
+  "raw_peak": 0.883,
+  "rss_mb": 4456
+ },
+ {
+  "name": "turbo-04-expr.wav",
+  "model": "turbo",
+  "line": "04",
+  "ref": "expr",
+  "audio_s": 4.84,
+  "wall_s": 10.81,
+  "rtf": 2.23,
+  "raw_peak": 0.74,
+  "rss_mb": 4474
+ }
+]
