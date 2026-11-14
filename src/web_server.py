@@ -676,6 +676,39 @@ def chat(
     return answer, no_reply
 
 
+def record_tts_timings(timings: dict[str, object] | None, payload: object) -> None:
+    """Record what a resident TTS service reported about one turn.
+
+    Each HTTP branch used to carry its own field list, which is why a Chatterbox turn came
+    back with no `tts_audio_seconds` and no peak at all: docs/tts-changeover-spec.md 7.2
+    checks clipping and per-turn latency, so a dropped field is a lost acceptance signal
+    rather than a cosmetic gap. One recorder, both backends.
+    """
+    if timings is None or not isinstance(payload, dict):
+        return
+    if isinstance(payload.get("generation_seconds"), (int, float)):
+        timings["tts_model_ms"] = round(float(payload["generation_seconds"]) * 1000, 1)
+    for source, target in (
+        ("prompt_seconds", "tts_prompt_ms"),
+        ("gen_seconds", "tts_generate_ms"),
+        ("vocoder_seconds", "tts_vocoder_ms"),
+    ):
+        if isinstance(payload.get(source), (int, float)):
+            timings[target] = round(float(payload[source]) * 1000, 1)
+    for source, target in (
+        ("audio_seconds", "tts_audio_seconds"),
+        ("raw_peak", "tts_raw_peak"),
+    ):
+        if isinstance(payload.get(source), (int, float)):
+            timings[target] = round(float(payload[source]), 3)
+    for source, target in (
+        ("peak_guard_applied", "tts_peak_guard"),
+        ("reference_cached", "tts_reference_cached"),
+    ):
+        if source in payload:
+            timings[target] = bool(payload[source])
+
+
 def synthesize(
     session: Session,
     text: str,
@@ -707,8 +740,7 @@ def synthesize(
             raise RuntimeError(f"Chatterbox returned HTTP {error.code}: {detail[-1000:]}") from error
         if not payload.get("output"):
             raise RuntimeError(f"Chatterbox returned an invalid response: {payload!r}")
-        if timings is not None and isinstance(payload.get("generation_seconds"), (int, float)):
-            timings["tts_model_ms"] = round(float(payload["generation_seconds"]) * 1000, 1)
+        record_tts_timings(timings, payload)
     elif backend == "qwen-service":
         # The resident llama.cpp TTS service keeps the weights loaded between turns,
         # which is what makes llama.cpp TTS usable in a conversation. It writes into
@@ -732,17 +764,7 @@ def synthesize(
             raise RuntimeError(f"Qwen TTS service returned HTTP {error.code}: {detail[-1000:]}") from error
         if not payload.get("output"):
             raise RuntimeError(f"Qwen TTS service returned an invalid response: {payload!r}")
-        if timings is not None and isinstance(payload.get("generation_seconds"), (int, float)):
-            timings["tts_model_ms"] = round(float(payload["generation_seconds"]) * 1000, 1)
-            for source, target in (
-                ("prompt_seconds", "tts_prompt_ms"),
-                ("gen_seconds", "tts_generate_ms"),
-                ("vocoder_seconds", "tts_vocoder_ms"),
-            ):
-                if isinstance(payload.get(source), (int, float)):
-                    timings[target] = round(float(payload[source]) * 1000, 1)
-            if isinstance(payload.get("audio_seconds"), (int, float)):
-                timings["tts_audio_seconds"] = round(float(payload["audio_seconds"]), 3)
+        record_tts_timings(timings, payload)
     elif backend == "qwen":
         command = [
             str(ROOT / "bin" / "llama-tts"),

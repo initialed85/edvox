@@ -155,5 +155,44 @@ class UrlResolution(unittest.TestCase):
         self.assertEqual(web_server.normalize_backend("  Chatterbox-Turbo "), "chatterbox-turbo")
 
 
+class Timings(unittest.TestCase):
+    """The defect: a Chatterbox turn reported no audio length and no peak, because each
+    HTTP branch kept its own list of fields to copy. docs/tts-changeover-spec.md 7.2 checks
+    clipping and latency from those fields, so a dropped field loses an acceptance signal."""
+
+    def test_chatterbox_fields_reach_timings(self):
+        timings: dict[str, object] = {}
+        web_server.record_tts_timings(timings, {
+            "generation_seconds": 10.72, "audio_seconds": 5.0, "raw_peak": 1.015,
+            "peak_guard_applied": True, "reference_cached": True,
+        })
+        self.assertEqual(timings["tts_model_ms"], 10720.0)
+        self.assertEqual(timings["tts_audio_seconds"], 5.0)
+        self.assertEqual(timings["tts_raw_peak"], 1.015)
+        self.assertIs(timings["tts_peak_guard"], True)
+
+    def test_qwen_fields_still_reach_timings(self):
+        timings: dict[str, object] = {}
+        web_server.record_tts_timings(timings, {
+            "generation_seconds": 7.56, "prompt_seconds": 0.36, "gen_seconds": 4.899,
+            "vocoder_seconds": 2.302, "audio_seconds": 5.28,
+        })
+        self.assertEqual(timings["tts_prompt_ms"], 360.0)
+        self.assertEqual(timings["tts_generate_ms"], 4899.0)
+        self.assertEqual(timings["tts_vocoder_ms"], 2302.0)
+        self.assertEqual(timings["tts_audio_seconds"], 5.28)
+
+    def test_absent_fields_are_absent_not_zero(self):
+        # A missing measurement must not look like a measured 0.0 peak.
+        timings: dict[str, object] = {}
+        web_server.record_tts_timings(timings, {"generation_seconds": 1.0})
+        self.assertNotIn("tts_raw_peak", timings)
+        self.assertNotIn("tts_peak_guard", timings)
+
+    def test_none_timings_is_safe(self):
+        web_server.record_tts_timings(None, {"generation_seconds": 1.0})
+        web_server.record_tts_timings({}, "not a dict")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

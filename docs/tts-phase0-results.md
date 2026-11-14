@@ -360,6 +360,15 @@ models — but the service now reports `exaggeration_is_inert_on_this_model` in 
   prose is generated from the map, that the settings allow-list and the dispatch share one
   source, and that backends resolve to distinct URLs. These fail if a backend is added
   without a measured cue policy.
+- Deployed on `home-dev` as `edvox-tts-chatterbox` (image
+  `initialed85/edvox-tts-chatterbox:0.1.7`, weights fetched idempotently by an init
+  container) with `edvox-web` still defaulting to `qwen-service`, so the cutover is one env
+  var (`WEB_DEFAULT_TTS_BACKEND`) and rollback is the same var flipped back. Cutover is held
+  for the listening decision. Two things that only the live path caught: a session with no
+  uploaded voice sends `reference:""`, which Qwen answers from its own speaker list and
+  Chatterbox 500'd on (now `CHATTERBOX_DEFAULT_REFERENCE`); and `/health` inherited the
+  legacy `TTS_URL` for every backend, so it reported `audiocpp: ok` against a service that
+  does not exist.
 - Verified live over HTTP on CPU: model load 5.9 s, reference warm-up 11.6 s, ~8.7–13.3 s per
   5–6 s turn at temperature 0.5, `PCM_S` 24 kHz, cache hits reported.
 

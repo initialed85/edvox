@@ -1,10 +1,12 @@
 # TTS changeover — specification and execution plan
 
-**Status:** Phase 2 §6.1/§6.2 complete (per-backend URLs + one cue-policy source, 15 tests in
-`tests/test_backend_policy.py`); the Chatterbox service is rewritten and verified live on CPU.
-Phase 2 deployment (image + manifests) is **held pending Ed's listening decision**, because
-Phase 2 measurement invalidated a premise this spec was built on: `exaggeration` is inert on
-Turbo, and `temperature` is the setting that decides whether the voice is usable at all.
+**Status:** Phase 2 is **deployed as a parallel service** on `home-dev` —
+`edvox-tts-chatterbox` (Chatterbox Turbo, `temperature=0.5`) is resident next to
+`edvox-tts` (Qwen), and `edvox-web` still defaults to `qwen-service`. §6.1/§6.2 landed with
+21 tests in `tests/test_backend_policy.py`. **Phase 3 cutover is held pending Ed's listening
+decision**, because Phase 2 measurement invalidated a premise this spec was built on:
+`exaggeration` is inert on Turbo, and `temperature` is the setting that decides whether the
+voice is usable at all (2/6 idiom renders at 0.8, 4/4 at 0.5).
 **Written:** 2026-11-14, against `edvox` head `622978a`.
 **Audience:** an execution agent with no access to the conversation that produced this
 document. Every fact you need is restated here; read the whole thing before touching
@@ -302,7 +304,7 @@ and build the prompt sentence from it, so a new backend cannot silently get the 
 policy. The backend allow-list in `/api/session/settings` must also come from
 `set(BACKEND_CUES)` rather than a literal. Add a unit test — see §6.5.
 
-### 6.3 Implement the winner (exactly one path) — service done, deploy held
+### 6.3 Implement the winner (exactly one path) — DEPLOYED, no cutover yet
 
 > **Correction that changes the config, not just the prose.** This section's "Chatterbox with
 > `exaggeration=1.5`" is not a real setting: Turbo has no `emotion_adv_fc` weight, so the dial
