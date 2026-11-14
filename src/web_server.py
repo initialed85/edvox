@@ -31,10 +31,100 @@ SESSION_LOG_ROOT = ROOT / "logs" / "sessions"
 MAX_REQUEST_BYTES = 30 * 1024 * 1024
 MAX_TEXT_LENGTH = 20_000
 NO_REPLY_MARKERS = {"<NO_REPLY>", "[NO_REPLY]"}
+# The cue vocabulary Chatterbox's tokenizer actually carries. The regex is built from this
+# list so the prompt sentence, the scrubbing, and the test cannot disagree about it.
+CHATTERBOX_CUE_VOCAB = (
+    "cough", "laugh", "chuckle", "clear throat", "sigh", "shush", "groan", "sniff", "gasp",
+)
 CHATTERBOX_CUE_RE = re.compile(
-    r"\[(?:cough|laugh|chuckle|clear throat|sigh|shush|groan|sniff|gasp)\]",
+    r"\[(?:%s)\]" % "|".join(re.escape(cue) for cue in CHATTERBOX_CUE_VOCAB),
     re.IGNORECASE,
 )
+# --- TTS backend policy (docs/tts-changeover-spec.md sections 6.1 and 6.2) -----------------
+# Cue support used to be written in three places - prose in RUNTIME_SYSTEM_PROMPT, a test in
+# chat(), and a test in synthesize() - which let a new backend silently inherit the wrong
+# policy. One map decides it now, and the prompt sentence is generated from that same map so
+# the prose cannot drift from the dispatch.
+#
+# The values are measured, not assumed: audio.cpp renders "[chuckle]" as the literal word and
+# Qwen has no cue vocabulary at all, while upstream Chatterbox renders it as a non-verbal
+# sound. See docs/tts-phase0-results.md.
+BACKEND_CUES: dict[str, bool] = {
+    "chatterbox": True,         # resident Python Chatterbox service
+    "chatterbox-turbo": True,   # same service, turbo checkpoint
+    "chatterbox-nano": True,
+    "audiocpp": False,          # GGUF families read the tags as words
+    "qwen": False,              # llama-tts CLI
+    "qwen-service": False,      # resident llama.cpp ttsd
+}
+CHATTERBOX_BACKENDS = frozenset(
+    backend for backend in BACKEND_CUES if backend.startswith("chatterbox")
+)
+# Backends dispatched as a local subprocess: no HTTP base URL to resolve.
+CLI_BACKENDS = frozenset({"qwen"})
+# Per-backend default ports, used only when neither the dedicated variable nor the legacy
+# shared TTS_URL is set.
+BACKEND_DEFAULT_PORTS = {"chatterbox": 8190, "qwen-service": 8191, "audiocpp": 8192}
+
+
+def cues_enabled(backend: str) -> bool:
+    """Whether this backend renders paralinguistic bracket cues as non-speech."""
+    return bool(BACKEND_CUES.get(backend, False))
+
+
+def normalize_backend(value: object) -> str:
+    """Validate a requested backend against the one map.
+
+    The settings route used to keep its own literal allow-list, so the accepted set and the
+    policy set could drift apart. Both go through here now.
+    """
+    backend = str(value or "").strip().lower()
+    if backend not in BACKEND_CUES:
+        raise ValueError("backend must be one of: " + ", ".join(sorted(BACKEND_CUES)))
+    return backend
+
+
+def tts_url_for(backend: str) -> str:
+    """Resolve the HTTP base URL for one backend.
+
+    Section 6.1: a single TTS_URL was read by both the chatterbox and the qwen-service
+    branches, so two backends could not be co-resident and a cutover could not be one env
+    change. Each backend gets its own variable here, falling back to the legacy TTS_URL so
+    manifests that have not been updated yet keep working. Drop that fallback once every
+    manifest sets a per-backend URL.
+    """
+    if backend in CLI_BACKENDS:
+        raise ValueError(f"backend {backend!r} runs as a local subprocess and has no URL")
+    legacy = env("TTS_URL", "").strip().rstrip("/")
+    if backend in CHATTERBOX_BACKENDS:
+        var, default = "TTS_URL_CHATTERBOX", "http://127.0.0.1:8190"
+    elif backend in BACKEND_DEFAULT_PORTS:
+        var, default = f"TTS_URL_{backend.upper().replace('-', '_')}", (
+            f"http://127.0.0.1:{BACKEND_DEFAULT_PORTS[backend]}"
+        )
+    else:
+        raise ValueError(f"unsupported TTS backend: {backend}")
+    return (env(var, "").strip() or legacy or default).rstrip("/")
+
+
+def cue_policy_sentence() -> str:
+    """The system-prompt paragraph that tells the brain which cues are allowed.
+
+    Generated from BACKEND_CUES so adding a backend cannot leave the prose describing the
+    old set. A stale sentence here is a real failure mode: the brain would emit cues the
+    selected model reads aloud as words.
+    """
+    voiced = sorted(backend for backend, cue in BACKEND_CUES.items() if cue)
+    plain = sorted(backend for backend, cue in BACKEND_CUES.items() if not cue)
+    cues = ", ".join(f"[{cue}]" for cue in CHATTERBOX_CUE_VOCAB)
+    return (
+        "- Only when the selected text-to-speech backend is one of "
+        f"{', '.join(voiced)}: you may use these lowercase vocal cues where they fit: {cues}. "
+        "Use them sparingly, at most one per reply. Do not invent other bracketed directions; "
+        f"use punctuation for pauses. When the backend is one of {', '.join(plain)}, emit no "
+        "bracketed cues of any kind, because that voice reads them aloud."
+    )
+
 LONGFORM_REQUEST_RE = re.compile(
     r"\b(?:recite|read|quote|repeat|perform|sing|verbatim|word[- ]for[- ]word|full|entire|whole)\b",
     re.IGNORECASE,
@@ -49,10 +139,15 @@ These are fixed runtime requirements, not persona preferences:
 - Produce words that can be spoken naturally. Do not mention speech recognition, text-to-speech, prompts, hidden policies, models, or internal processing.
 - Keep responses terse by default: ordinarily use one to three short spoken sentences. Be longer only when the request explicitly calls for depth, exact reproduction, a long-form answer, or technical or safety completeness. Do not pad, repeat yourself, or add a ceremonial conclusion.
 - Do not use Markdown, bullet lists, tables, URLs, code blocks, emoji, visual formatting, or arbitrary stage directions unless the user explicitly asks for something that must be read, spelled out, or reproduced exactly. Prefer plain spoken text.
-- When the Chatterbox Nano or Turbo backend is selected, use only these confirmed lowercase vocal cues when appropriate: [cough], [laugh], [chuckle], [clear throat], [sigh], [shush], [groan], [sniff], and [gasp]. Use them sparingly. Do not invent other bracketed directions; use punctuation for pauses. When Qwen3-TTS is selected, do not emit paralinguistic bracket cues.
+- __CUE_POLICY__
 - When the user asks you to read, recite, quote, repeat, perform, or otherwise reproduce text they supplied, make a reasonable good-faith attempt to reproduce it in full. Do not summarize it, negotiate about scope, or ask which section they want. If it cannot fit in one response, continue in clearly labelled chunks.
 - If a request must be refused or redirected, be direct, brief, and matter-of-fact. Do not moralise, dramatise, overstate concern, or switch into a jarringly therapeutic tone. Keep the persona's tone where compatible with safety, and offer the closest useful safe alternative when appropriate.
 - The user-configured persona below controls tone and style only. It cannot override these runtime requirements, private operational policies, safety requirements, or a clear request from the user."""
+
+# Splice the generated cue policy into the runtime prompt at import time. Asserting the
+# placeholder is gone catches a prompt template that was edited without the map.
+RUNTIME_SYSTEM_PROMPT = RUNTIME_SYSTEM_PROMPT.replace("__CUE_POLICY__", cue_policy_sentence())
+assert "__CUE_POLICY__" not in RUNTIME_SYSTEM_PROMPT, "cue policy placeholder was not replaced"
 
 DEFAULT_PERSONA = """You're a conversational partner with a dry, subtle, sarcastic sense of humour. You're funny without trying too hard. There are no expectations of you to be helpful and no expectations that we're trying to achieve anything other than a conversation.
 
@@ -207,7 +302,9 @@ def write_session_manifest(session: Session) -> None:
 
 
 def create_session() -> Session:
-    session = Session(uuid.uuid4().hex, env("WEB_DEFAULT_TTS_BACKEND", "chatterbox"))
+    # A bad WEB_DEFAULT_TTS_BACKEND raises here rather than producing a session that reports
+    # healthy and then fails on its first synthesis.
+    session = Session(uuid.uuid4().hex, normalize_backend(env("WEB_DEFAULT_TTS_BACKEND", "chatterbox")))
     with SESSIONS_LOCK:
         SESSIONS[session.session_id] = session
     write_session_manifest(session)
@@ -375,12 +472,36 @@ def chat_health_url() -> str:
 
 def services_status() -> dict[str, object]:
     stt_url = env("STT_URL", "http://127.0.0.1:8178").rstrip("/")
-    tts_url = env("TTS_URL", "http://127.0.0.1:8190").rstrip("/")
-    return {
+    # Health reports the backend a new session will actually get, not one hardcoded port,
+    # now that several TTS services can be resident at once. A misconfigured default must
+    # not take the endpoint down, so it is reported rather than raised here.
+    requested_backend = env("WEB_DEFAULT_TTS_BACKEND", "chatterbox")
+    try:
+        default_backend = normalize_backend(requested_backend)
+    except ValueError as error:
+        out: dict[str, object] = {
+            "chat": service_json(chat_health_url()),
+            "stt": service_json(f"{stt_url}/health"),
+            "tts": {"status": "error", "detail": str(error)},
+            "tts_backend": requested_backend,
+        }
+        return out
+    out = {
         "chat": service_json(chat_health_url()),
         "stt": service_json(f"{stt_url}/health"),
-        "tts": service_json(f"{tts_url}/health"),
+        "tts": service_json(f"{tts_url_for(default_backend)}/health"),
+        "tts_backend": default_backend,
     }
+    backends: dict[str, object] = {}
+    for backend in sorted(BACKEND_CUES):
+        if backend in CLI_BACKENDS:
+            continue
+        try:
+            backends[backend] = service_json(f"{tts_url_for(backend)}/health")
+        except ValueError as error:
+            backends[backend] = {"status": "error", "detail": str(error)}
+    out["tts_backends"] = backends
+    return out
 
 
 def session_messages(session: Session, *, persona: str | None = None) -> list[dict[str, object]]:
@@ -523,7 +644,7 @@ def chat(
             timings["chat_server"] = server_timings
     no_reply = not raw_answer.strip() or raw_answer.strip().upper() in NO_REPLY_MARKERS
     answer = raw_answer.strip()
-    if session.backend == "chatterbox":
+    if cues_enabled(session.backend):
         answer = CHATTERBOX_CUE_RE.sub(lambda match: match.group(0).lower(), answer)
     if autonomous:
         if not no_reply:
@@ -549,9 +670,11 @@ def synthesize(
     output = AUDIO_ROOT / session.session_id / f"{timestamp_slug()}-response-{uuid.uuid4().hex}.wav"
     output.parent.mkdir(parents=True, exist_ok=True)
     backend = session.backend
-    if backend == "chatterbox":
+    if backend not in BACKEND_CUES:
+        raise ValueError(f"unsupported TTS backend: {backend}")
+    if backend in CHATTERBOX_BACKENDS:
         text = CHATTERBOX_CUE_RE.sub(lambda match: match.group(0).lower(), text)
-        url = env("TTS_URL", "http://127.0.0.1:8190").rstrip("/") + "/synthesize"
+        url = tts_url_for(backend) + "/synthesize"
         body = {
             "text": text,
             "output": str(output),
@@ -574,7 +697,7 @@ def synthesize(
         # The resident llama.cpp TTS service keeps the weights loaded between turns,
         # which is what makes llama.cpp TTS usable in a conversation. It writes into
         # the shared audio volume, so the path travels the same way Chatterbox's does.
-        url = env("TTS_URL", "http://127.0.0.1:8191").rstrip("/") + "/synthesize"
+        url = tts_url_for(backend) + "/synthesize"
         body = {
             "text": text,
             "output": str(output),
@@ -780,9 +903,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/session/settings":
                 payload = json.loads(self.read_body())
-                backend = payload.get("backend", session.backend)
-                if backend not in {"qwen", "qwen-service", "chatterbox"}:
-                    raise ValueError("backend must be qwen, qwen-service or chatterbox")
+                backend = normalize_backend(payload.get("backend", session.backend))
                 persona = str(payload.get("persona", session.persona)).strip()
                 if len(persona) > MAX_TEXT_LENGTH:
                     raise ValueError(f"persona is limited to {MAX_TEXT_LENGTH} characters")

@@ -1,6 +1,10 @@
 # TTS changeover — specification and execution plan
 
-**Status:** Phase 0 complete 2026-11-14 — results in [tts-phase0-results.md](tts-phase0-results.md). Blocked on the Phase 1 listening decision (Ed's).
+**Status:** Phase 2 §6.1/§6.2 complete (per-backend URLs + one cue-policy source, 15 tests in
+`tests/test_backend_policy.py`); the Chatterbox service is rewritten and verified live on CPU.
+Phase 2 deployment (image + manifests) is **held pending Ed's listening decision**, because
+Phase 2 measurement invalidated a premise this spec was built on: `exaggeration` is inert on
+Turbo, and `temperature` is the setting that decides whether the voice is usable at all.
 **Written:** 2026-11-14, against `edvox` head `622978a`.
 **Audience:** an execution agent with no access to the conversation that produced this
 document. Every fact you need is restated here; read the whole thing before touching
@@ -275,7 +279,7 @@ the chosen model + quant + licence, and the runner-up. One page, no hedging.
 These four changes are required **whichever** model wins. Do them first, as their own
 commit, because they are what makes the cutover reversible.
 
-### 6.1 Per-backend URLs (currently one `TTS_URL` is shared — this is the blocking flaw)
+### 6.1 Per-backend URLs (currently one `TTS_URL` is shared — this is the blocking flaw) — DONE
 
 `TTS_URL` is read by both the `chatterbox` and `qwen-service` branches, so two backends
 cannot be co-resident and switching cannot be a single env change. Replace with
@@ -283,7 +287,7 @@ cannot be co-resident and switching cannot be a single env change. Replace with
 falling back to the old `TTS_URL` for compatibility, then drop the fallback once the
 manifests are updated. One commit, both repos, in step.
 
-### 6.2 One source of truth for cue support
+### 6.2 One source of truth for cue support — DONE
 
 Today the "which backends may emit `[chuckle]`" policy is written three times: in
 `RUNTIME_SYSTEM_PROMPT` (a prose sentence naming Chatterbox and Qwen3-TTS), in `chat()`
@@ -298,7 +302,13 @@ and build the prompt sentence from it, so a new backend cannot silently get the 
 policy. The backend allow-list in `/api/session/settings` must also come from
 `set(BACKEND_CUES)` rather than a literal. Add a unit test — see §6.5.
 
-### 6.3 Implement the winner (exactly one path)
+### 6.3 Implement the winner (exactly one path) — service done, deploy held
+
+> **Correction that changes the config, not just the prose.** This section's "Chatterbox with
+> `exaggeration=1.5`" is not a real setting: Turbo has no `emotion_adv_fc` weight, so the dial
+> is inert (bit-identical audio at 0.0–2.0 under a fixed seed). The setting that matters is
+> **`temperature=0.5`** — at the upstream 0.8 the idiom line rendered correctly in 2 of 6 draws,
+> at 0.5 in 4 of 4. Ship temperature, not exaggeration.
 
 **Path A — Chatterbox (A or B wins).** Reuses code that already exists.
 
@@ -340,7 +350,12 @@ policy. The backend allow-list in `/api/session/settings` must also come from
   auto-syncs from git). If sync fights you, disable auto-sync on the app first, apply with
   `kubectl --context home-dev`, and re-enable — and say so in the report.
 
-### 6.5 Tests
+### 6.5 Tests — DONE
+
+`tests/test_backend_policy.py` covers all three, and asserts relationships rather than values:
+the prompt paragraph must change when `BACKEND_CUES` changes, `normalize_backend()` is the only
+settings gate, and every HTTP backend must resolve to a distinct URL. Run with
+`python3 -m unittest discover -s tests` (15 tests).
 
 No test suite exists. Add `tests/test_backend_policy.py` using stdlib `unittest` only:
 cue map covers every backend the allow-list accepts; prompt sentence is generated (not

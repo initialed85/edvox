@@ -19,7 +19,7 @@ Everything else fails a hard requirement:
 | candidate | runtime | RTF (mean / best) | peak RSS | clones our voice? | emotion control | verdict |
 |---|---|---|---|---|---|---|
 | **Qwen3-TTS 1.7B Base (production)** | C++ `ttsd`, resident | **1.43** | 5 817 MB | yes | **none** | fastest, but no control at all |
-| **Chatterbox Turbo — upstream Python** | torch CPU, resident | **2.77** | 6 386 MB | yes | **19 tag tokens + `exaggeration`** | **only viable expressive option tonight** |
+| **Chatterbox Turbo — upstream Python** | torch CPU, resident | **2.77** | 6 386 MB | yes | **19 tag tokens** (`exaggeration` is accepted but inert — see correction below) | **only viable expressive option tonight** |
 | Chatterbox 0.5B (GGUF) | audio.cpp | 5.22–5.96 | 2 524 MB | yes | tags spoken as literal words | out on control |
 | CosyVoice3 (GGUF) | audio.cpp | 6.80 (30.35 contended) | 2 719 MB | yes | `instruct` template — works | out on speed/verbosity |
 | Chatterbox Turbo (GGUF) | audio.cpp | 4.05 | 3 891 MB | **no** (`supports_speaker_reference 0`) | none | out — cannot keep the accent |
@@ -101,7 +101,7 @@ the *accent* and the *delivery* that need listening.
    aside, keep `ref16k.wav` alongside every CosyVoice3 reference.
 5. **`--language` is not universal.** CosyVoice3 rejects it outright; harnesses must vary
    flags per family rather than assume one command shape.
-6. **Clipping is real but not monotonic in `exaggeration`.** Measured peak per render:
+6. **Clipping is real but is not controlled by `exaggeration` at all.** Measured peak per render:
    stripped 0.493, `exaggeration=0.3` 0.750, `0.8` **1.005 (over full scale)**, word 0.943,
    `1.5` 0.765. The loudness dial does not map monotonically onto peak amplitude, and
    `norm_loudness=True` (already the default in `generate()`) does not guarantee peak safety
@@ -169,8 +169,15 @@ Three questions the numbers cannot answer:
    like a different person — use it as the null.
 2. **Is the `[chuckle]` render a laugh, or a garble?** Compare
    `chatterbox_turbo_upstream-03-tagged.wav` against `-03-stripped.wav` and `-03-word.wav`.
-3. ~~How much `exaggeration` is too much?~~ **Answered: 1.5** is the good breathy chuckle,
-   and it does not clip. See correction 6 — the dial gets a peak guard, not a clamp.
+3. ~~How much `exaggeration` is too much?~~ **Unanswerable: the dial is inert on Turbo**
+   (bit-identical renders at 0.0/0.5/1.5/2.0 under a fixed seed — see the correction below).
+   Every earlier "1.5 is better" listening note was a comparison of two draws from the same
+   distribution.
+4. **The question that replaced it: is `temperature=0.5` still expressive?** Turbo's word
+   accuracy at 0.8 was 2/6 on the idiom line and 4/4 at 0.5, so 0.5 is proposed — but a
+   calmer sampler may also flatten the delivery we chose this model for. Listen to
+   `samples/ab/final/FINAL-*-temp05.wav` and say whether the laugh and the accent still land
+   at the setting that can be shipped.
 
 ### Phase 1 — how the picks developed
 
@@ -223,6 +230,9 @@ accent at 2× the latency and no non-verbal sounds.
 
 ### This was later revised: `exaggeration` was confounding the accent verdict
 
+> **Superseded by the next section.** The mechanism proposed here does not exist on Turbo.
+> Read the correction below before relying on any `exaggeration` number in this section.
+
 The "marginally more British" and "basically standard American" verdicts on the idiom line
 were heard at the library default `exaggeration=0.5`. Re-rendering line 04 at Ed's chosen
 `1.5` with the same reference and the tag present (`scripts/turbo_preflight.py`,
@@ -255,7 +265,67 @@ candidate where expressiveness does not come from the training mixture that appe
 the accent. It was eliminated on performance before listening, which was a measurement
 ordering decision, not evidence about its accent.
 
-## If you pick Chatterbox Turbo (Phase 2 shape)
+### Correction, again, and this time it is structural: `exaggeration` does nothing on Turbo
+
+The revision above attributed the "sapphire pie" → "servo pie" improvement to the dial. That
+attribution is wrong, and the evidence is not a listening judgement:
+
+```python
+m.prepare_conditionals(ref, exaggeration=e)
+m.generate(text)          # fixed torch/numpy seed, same reference, same text
+```
+
+| exaggeration | output vs exaggeration=0.0 |
+|---|---|
+| 0.0 | (baseline) |
+| 0.5 | **bit-identical** |
+| 1.5 | **bit-identical** |
+| 2.0 | **bit-identical** |
+
+All four renders were the same 42,240 samples. The reason is structural: `prepare_conditionals`
+bakes the value in as `T3Cond.emotion_adv`, which is consumed only by `cond_enc.emotion_adv_fc`
+(a `Linear(1, n_channels)` instantiated when `hp.emotion_adv` is set). Turbo's
+`t3_turbo_v1.safetensors` has **no `emotion_adv_*` key among its 299 tensors**, and in the loaded
+model `t3.cond_enc.emotion_adv_fc is None`. The value is written into the conditional and then
+read by nothing. Upstream already says so — `generate()` warns "CFG, min_p and exaggeration are
+not supported by Turbo version and will be ignored" — and that warning is accurate; the base
+class `tts.py` has a branch that patches `emotion_adv` into cached conditionals, Turbo does not.
+
+Consequences, in order of importance:
+
+1. **The `0.5` vs `1.5` comparison was two draws from the same distribution.** So was every
+   other `exaggeration` row in this document, including the `preflight` table above. The idiom
+   line is a coin flip, not a dial setting.
+2. **The lever that actually moves Turbo is `temperature`**, via `t3.inference_turbo`. Measured
+   on the idiom line (`servo pie` and `arvo` both correct in the live whisper transcript),
+   6 draws at the library default and 4 each at lower settings, same reference, same resident
+   service (`src/chatterbox_server.py` over HTTP):
+
+   | temperature | idiom correct | wall per turn |
+   |---|---|---|
+   | 0.8 (upstream default) | **2 / 6** | 8.7–9.9 s |
+   | 0.5 | **4 / 4** | 9.9–13.3 s |
+   | 0.3 | **4 / 4** | 10.3–22.9 s |
+
+   Small n, but 2/6 versus 4/4 twice is not subtle. At 0.8 a mangled turn is the norm, not the
+   exception: one draw rendered "she'll be right" as "shall we write", another dropped "Yeah
+   nah" entirely. Lower temperature also costs speed at 0.3 (one draw took 22.9 s), so 0.5 is
+   the setting to ship unless listening says otherwise.
+3. **`[chuckle]` is still absorbed as non-speech at temperature 0.5** (transcripts contain no
+   spoken word for it), but its *duration* signature is unreliable — plain-vs-tagged deltas at
+   0.5 were +3.04 s, -0.72 s, +0.48 s. Duration difference is therefore not a good automated
+   tag detector; transcription absence is.
+4. Phase 0/1 accent verdicts that compared Turbo renders are **noise-dominated** and should be
+   read as "unresolved at n=1" rather than as findings. The coupling conclusion still holds for
+   MTL/standard, which were judged on clearly different outputs, and the GGUF-vs-Turbo accent
+   gap was heard across several lines rather than one.
+
+The `exaggeration` parameter stays in the service contract — it is genuinely honoured by the
+standard and MTL checkpoints, and a caller should not change wire formats when it changes
+models — but the service now reports `exaggeration_is_inert_on_this_model` in `/health` and
+`dial_applies_to_model` per response so nobody is fooled by it a third time.
+
+## If you pick Chatterbox Turbo (Phase 2 shape) — now implemented
 
 - Replace or parallel the C++ `ttsd` with a resident Python service holding
   `ChatterboxTurboTTS` loaded once (6 s cold, 6.4 GB resident). This is the real cost: it
@@ -263,11 +333,35 @@ ordering decision, not evidence about its accent.
 - The spec's prerequisites still stand and get easier: split `TTS_URL` into per-backend
   URLs, and move cue policy into one `BACKEND_CUES` map — now knowable per backend rather
   than guessed.
-- Clamp `exaggeration` to a non-clipping ceiling and add headroom normalisation.
+- ~~Clamp `exaggeration` to a non-clipping ceiling~~ — the dial is inert on Turbo, so it
+  cannot be the clipping control. Instead: `norm_loudness=True` equalises loudness without
+  bounding amplitude, so the service applies a **peak guard** (scale to ~-1 dBFS when
+  `raw_peak` > 0.988) and reports `raw_peak` / `peak_guard_applied` per response.
+- Ship **`temperature=0.5`**, not the upstream 0.8. At 0.8 the idiom line survived 2/6 turns;
+  at 0.5, 4/4. This is the single highest-impact setting in the whole changeover.
 - Expect ~2× slower than Qwen. **Keep Qwen resident as the low-latency voice** and route
   short/urgent replies to it if the slowness bites — co-residency is proven at two models.
 - Re-run `scripts/run_ab.py` and `scripts/run_resident.py` after the RTX 2080 lands with
   `--backend cuda`; GPU changes the ranking more than any tuning on CPU will.
+
+## What Phase 2 actually shipped
+
+- `src/web_server.py`: `BACKEND_CUES` is the one cue-policy source, the system-prompt
+  paragraph is generated from it, `normalize_backend()` gates the settings route, and
+  `tts_url_for()` gives every backend its own variable (`TTS_URL_CHATTERBOX`,
+  `TTS_URL_QWEN_SERVICE`, `TTS_URL_AUDIOCPP`) with a legacy `TTS_URL` fallback. `/health`
+  now reports `tts_backend` plus a `tts_backends` map instead of one hardcoded port.
+- `src/chatterbox_server.py`: rewritten against the real 0.1.7 API (`from_local(ckpt_dir,
+  device)`; no `nano=` kwarg), conditionals cached by `(path, mtime_ns, size,
+  exaggeration)`, 16-bit PCM output, `TTS_ALLOW_ROOTS` confinement matching
+  `native/ttsd.cpp`, peak guard, startup warm-up, and `temperature` / `repetition_penalty`
+  exposed per request.
+- `tests/test_backend_policy.py`: 15 tests asserting the *relationships* — that the prompt
+  prose is generated from the map, that the settings allow-list and the dispatch share one
+  source, and that backends resolve to distinct URLs. These fail if a backend is added
+  without a measured cue policy.
+- Verified live over HTTP on CPU: model load 5.9 s, reference warm-up 11.6 s, ~8.7–13.3 s per
+  5–6 s turn at temperature 0.5, `PCM_S` 24 kHz, cache hits reported.
 
 ## Cleanup state
 
