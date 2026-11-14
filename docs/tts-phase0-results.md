@@ -101,9 +101,15 @@ the *accent* and the *delivery* that need listening.
    aside, keep `ref16k.wav` alongside every CosyVoice3 reference.
 5. **`--language` is not universal.** CosyVoice3 rejects it outright; harnesses must vary
    flags per family rather than assume one command shape.
-6. **Clipping at high `exaggeration`.** `exaggeration=0.8` produced a peak of **1.005** —
-   digital clipping. If we adopt Chatterbox, Phase 2 needs a headroom ceiling (≈0.7–0.8) or
-   a limiter, and the tag/emotion policy must not expose values that clip.
+6. **Clipping is real but not monotonic in `exaggeration`.** Measured peak per render:
+   stripped 0.493, `exaggeration=0.3` 0.750, `0.8` **1.005 (over full scale)**, word 0.943,
+   `1.5` 0.765. The loudness dial does not map monotonically onto peak amplitude, and
+   `norm_loudness=True` (already the default in `generate()`) does not guarantee peak safety
+   either. Phase 2 should therefore **not** clamp the dial to a conservative ceiling; it
+   should add an explicit peak guard (scale to ≈‑1 dBFS) so any `exaggeration` the listener
+   likes stays usable. Ed's ear picked `1.5` as the good breathy chuckle and it is the
+   *clean* one — clamping at 0.7 would have removed the sound actually wanted while still
+   admitting the 0.8 render that clipped.
 7. **Multi-model co-residency works but is not free.** One `audiocpp_server` held
    Chatterbox + CosyVoice3 + IndexTTS (7.9 GB of GGUFs) loaded simultaneously and served
    `/v1/audio/speech` against `--voice-dir`, auto-discovering `aussie-conv-ref` and
@@ -163,8 +169,21 @@ Three questions the numbers cannot answer:
    like a different person — use it as the null.
 2. **Is the `[chuckle]` render a laugh, or a garble?** Compare
    `chatterbox_turbo_upstream-03-tagged.wav` against `-03-stripped.wav` and `-03-word.wav`.
-3. **How much `exaggeration` is too much?** `03-tagged-x08`/`-x15` are pushed; x08 already
-   clips. Decide the ceiling you are happy to live with, since Phase 2 has to hard-code it.
+3. ~~How much `exaggeration` is too much?~~ **Answered: 1.5** is the good breathy chuckle,
+   and it does not clip. See correction 6 — the dial gets a peak guard, not a clamp.
+
+### Phase 1 partial result — an open conflict in the two picks
+
+The first two selections cross runtimes. `04-G07` ("good accent-wise") is **Chatterbox
+GGUF**, the runtime that renders `[chuckle]` as the literal word; `03-tagged-x15` ("good
+breathy laugh chuckle thing") is **Chatterbox Turbo under upstream Python**, the only
+runtime that still has the tag vocabulary. The accent that passed and the laugh that passed
+are not currently available from the same server.
+
+`04-X22` settles it: Python Turbo on the *same* line 04 text and reference as `04-G07`,
+with `03-J09` as its tag-line render. If Python Turbo's accent also passes, it is the only
+candidate meeting both requirements and GGUF Chatterbox adds nothing over it. If it does
+not, the accent outranks the tags and the changeover should not proceed.
 
 ## If you pick Chatterbox Turbo (Phase 2 shape)
 
