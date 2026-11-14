@@ -43,7 +43,7 @@ Report at the end using the template in §10.
 | PVC | `edvox-data`, NFS RWX, 5 Gi, subPaths `audio/` and `voices/` |
 | Model cache | hostPath `/home/edward/.cache/edvox/models` (init container downloads into it) |
 | Services | `voice-chat:80` → web, `edvox-tts:8191` → TTS daemon, `edvox-whisper:8178` |
-| Voice refs | `voices/clone/aussie-ref.wav` (default), `kajira-ref.wav`, `dainty-ref.wav` on the PVC; sources in `voices/` |
+| Voice refs | PVC `voices/clone/`: `aussie-conv-ref.wav` (use this), `aussie-expressive-ref.wav`, `aussie-intro-ref.wav`, plus legacy `aussie-ref.wav` (a caricature — see O1) and `kajira-ref.wav`/`dainty-ref.wav` (not Australian, do not use). Sources in `voices/`, gitignored. |
 
 ### The three TTS backends that already exist in `src/web_server.py`
 
@@ -176,8 +176,15 @@ paralinguistic tag (expect models without tags to read or drop it — record whi
 Australian lexical/prosodic marker, `05` conversational timing. Line `03` is the crux for
 models A and B.
 
-Reference: `voices/clone/aussie-ref.wav`. **Also run `kajira-ref.wav`** for line `01` only,
-so Ed can hear whether accent retention depends on the clip. See open question **O1**.
+Reference: **`voices/clone/aussie-conv-ref.wav`** — a natural 10.3 s window of the same
+speaker (see O1 in §9). Also run line `01` with **`voices/clone/aussie-expressive-ref.wav`**,
+the same woman being animated. Reference window is a variable in its own right, and there is
+evidence it matters (§9 O1): treat a model that only sounds right with one of the two clips
+as fragile.
+
+Do **not** use `kajira-ref.wav` or `dainty-ref.wav`. Both are non-Australian, one is
+explicit, and neither is a documented real speaker — conditioning on them cannot answer a
+question about Australian accent retention.
 
 ### 4.4 Commands and measurement
 
@@ -210,8 +217,11 @@ pod's `kubectl top` after the run, or omit with a note — **never invent it**.
   `<code>-<line>.wav` where `<code>` is a random 3-letter string per model.
 - `samples/ab-<date>/legend.txt` maps code → model + quant + licence, with the first line:
   `Listen first. Then read this.`
-- Commit WAVs only if total size is under 25 MB; otherwise commit `metrics.csv`,
-  `corpus.tsv`, `legend.txt`, and a `README.md` stating where the WAVs are on disk.
+- **Never commit audio.** These are clones of a real, identifiable person's voice and this
+  repository is **public** (`initialed85/edvox`). `.gitignore` already excludes `*.wav`;
+  do not `git add -f` around it. Commit `metrics.csv`, `corpus.tsv`, `legend.txt` and a
+  `README.md` that says where the WAVs are on disk. If audio must be shared, it goes over
+  the LAN (the PVC, or `samples/` on this workstation), not into git.
 
 ### 4.6 Phase 0 acceptance
 
@@ -396,12 +406,28 @@ deploy/edvox-web`. Write the exact rollback commit hash into the Phase 3 report.
 
 ## 9. Open questions and known traps
 
-**O1 — which reference clip is the Australian *female* voice?** Ed asked for an Australian
-female accent. The three refs are `aussie-ref.wav`, `kajira-ref.wav`, `dainty-ref.wav`,
-trimmed from `voice-aussie.wav`, `voice-kajira.wav`, `voice-dainty2.wav`. Provenance and
-gender are undocumented. **Ask Ed before Phase 1.** If none is a female Australian voice,
-the listening test cannot answer the question — say so and request a 10–20 s clip rather
-than reporting a conclusion you cannot support.
+**O1 — reference clip: RESOLVED 2026-11-14.** `voice-aussie.wav` is a real Australian woman
+(raised in Tamworth, NSW; living in Sydney) doing an unscripted "accent tag" video. Evidence:
+median F0 228.6 Hz over 2911 voiced frames (female range), and the transcript identifies the
+speaker and place. **She is the reference speaker.** `kajira` and `dainty` are not Australian
+and are not usable for this test.
+
+**Consequence, and it matters for Phase 0:** the pre-existing `aussie-ref.wav` is the first
+10 s of that video, which is her *impersonating the "shrimp on the barbie" stereotype* in a
+sarcastic caricature, not her natural voice. Conditioning on it would have taught every
+candidate a parody accent and then blamed the model. Two replacements are in place:
+
+| File | Window | Character |
+| --- | --- | --- |
+| `aussie-conv-ref.wav` | 00:45.4 +10.3 s | natural conversational register — **primary** |
+| `aussie-expressive-ref.wav` | 03:07.2 +11.6 s | animated, continuous speech — expressiveness probe |
+| `aussie-intro-ref.wav` | 00:29.7 +10.5 s | self-introduction, cleanest acoustically — spare |
+| `aussie-ref.wav` | 00:00 +10 s | **the caricature — do not use** |
+
+All three new windows are mono 24 kHz, peak −7 to −9 dBFS, no clipping. Verified able to load
+and synthesise on the live daemon. They live in `voices/` (gitignored) and are installed on
+the PVC at `voices/clone/`. Re-trim from `voice-aussie.wav` if a window is ever lost — do not
+re-record the source.
 
 **T1 — Chatterbox Turbo has no official GGUF.** `ggml-org/chatterbox-GGUF` currently ships
 only the 0.5B original. `audio.cpp`'s Turbo port is marked *testing*, is built from a
