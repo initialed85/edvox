@@ -74,3 +74,11 @@ nothing to offload to either way.
 [docs/tts-sizing.md](tts-sizing.md) has the numbers from `august-desktop`: peak RSS per
 thread count, KV-quantisation effect, cost per turn, and why the pending RTX 2080 is a
 speed decision rather than a "will it run" decision.
+
+## Changing the speech model
+
+[tts-changeover-spec.md](tts-changeover-spec.md) is the handover plan for replacing the
+TTS model: the measured A/B harness, the listening gate that belongs to Ed, the two
+plumbing fixes required first (per-backend `TTS_URL_*`, one cue-support map), the
+deployment shape for each candidate, and the rollback. Written to be executed by an agent
+with no prior context — execute the phases in order and do not substitute the decision.
