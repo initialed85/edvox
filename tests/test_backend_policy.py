@@ -80,7 +80,8 @@ class PromptPolicy(unittest.TestCase):
 class UrlResolution(unittest.TestCase):
     def setUp(self):
         self._saved = {k: os.environ.get(k) for k in
-                       ("TTS_URL", "TTS_URL_CHATTERBOX", "TTS_URL_QWEN_SERVICE", "TTS_URL_AUDIOCPP")}
+                       ("TTS_URL", "TTS_URL_CHATTERBOX", "TTS_URL_QWEN_SERVICE",
+                        "TTS_URL_AUDIOCPP", "WEB_DEFAULT_TTS_BACKEND")}
         for key in self._saved:
             os.environ.pop(key, None)
 
@@ -108,9 +109,28 @@ class UrlResolution(unittest.TestCase):
                 continue
             self.assertTrue(web_server.tts_url_for(backend).startswith("http://"), backend)
 
-    def test_legacy_shared_url_still_works(self):
+    def test_turbo_and_nano_share_the_one_chatterbox_service(self):
+        # They are the same deployment selected by checkpoint directory, not three services -
+        # so a family member must never resolve to a port of its own.
+        for member in ("chatterbox-turbo", "chatterbox-nano"):
+            self.assertEqual(web_server.tts_url_for(member), web_server.tts_url_for("chatterbox"),
+                             member)
+
+    def test_legacy_shared_url_applies_only_to_the_default_backend(self):
+        # TTS_URL names whichever service a deployment runs. Inheriting it for every backend
+        # made /health report "audiocpp: ok" against a service that does not exist, because
+        # the URL was really the Qwen daemon.
         os.environ["TTS_URL"] = "http://legacy:9999"
+        os.environ["WEB_DEFAULT_TTS_BACKEND"] = "qwen-service"
+        self.assertEqual(web_server.tts_url_for("qwen-service"), "http://legacy:9999")
+        self.assertEqual(web_server.tts_url_for("audiocpp"), "http://127.0.0.1:8192")
+        self.assertEqual(web_server.tts_url_for("chatterbox"), "http://127.0.0.1:8190")
+
+    def test_legacy_url_follows_a_reconfigured_default(self):
+        os.environ["TTS_URL"] = "http://legacy:9999"
+        os.environ["WEB_DEFAULT_TTS_BACKEND"] = "audiocpp"
         self.assertEqual(web_server.tts_url_for("audiocpp"), "http://legacy:9999")
+        self.assertEqual(web_server.tts_url_for("qwen-service"), "http://127.0.0.1:8191")
 
     def test_dedicated_variable_beats_legacy(self):
         os.environ["TTS_URL"] = "http://legacy:9999"

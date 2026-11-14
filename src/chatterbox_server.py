@@ -65,13 +65,15 @@ class State:
     def __init__(self, model, model_name: str, device: str, default_exaggeration: float,
                  reference_cache_size: int, allow_roots: list[Path],
                  default_temperature: float = 0.8,
-                 default_repetition_penalty: float = 1.2) -> None:
+                 default_repetition_penalty: float = 1.2,
+                 default_reference: str = "") -> None:
         self.model = model
         self.model_name = model_name
         self.device = device
         self.default_exaggeration = default_exaggeration
         self.default_temperature = default_temperature
         self.default_repetition_penalty = default_repetition_penalty
+        self.default_reference = default_reference
         self.allow_roots = allow_roots
         self.lock = threading.Lock()
         self.reference_cache: OrderedDict[ReferenceKey, Any] = OrderedDict()
@@ -141,6 +143,10 @@ class Handler(BaseHTTPRequestHandler):
                     "exaggeration_is_inert_on_this_model": state.model_name == "turbo",
                     "temperature": state.default_temperature,
                     "repetition_penalty": state.default_repetition_penalty,
+                    # Which clip a request with no reference will use, mirroring the Qwen
+                    # daemon's built-in speaker fallback. Reported because the failure mode
+                    # is silent: an unset default means every voiceless session 500s.
+                    "default_reference": state.default_reference or None,
                     "cached_references": len(state.reference_cache),
                     "active_reference": active[0] if active else None,
                     "active_exaggeration": active[3] if active else None,
@@ -162,8 +168,18 @@ class Handler(BaseHTTPRequestHandler):
             if not text:
                 raise ValueError("text is required")
             reference = str(request.get("reference", "")).strip()
+            # A browser session that has not uploaded a voice sends reference:"" - exactly
+            # what it sends to native/ttsd.cpp, which falls back to its own speaker list.
+            # Chatterbox has no built-in speaker at all, so without this the whole product
+            # 500s for anyone who has not uploaded a clip.
+            reference_source = "session"
             if not reference:
-                raise ValueError("reference is required: Chatterbox needs a voice to clone")
+                reference = state.default_reference
+                reference_source = "service-default"
+            if not reference:
+                raise ValueError(
+                    "no reference in the request and CHATTERBOX_DEFAULT_REFERENCE is unset"
+                )
             reference_path = Path(reference).expanduser()
             if not reference_path.is_file():
                 raise FileNotFoundError(f"reference audio not found: {reference}")
@@ -228,6 +244,7 @@ class Handler(BaseHTTPRequestHandler):
                 "repetition_penalty": repetition_penalty,
                 "dial_applies_to_model": state.model_name != "turbo",
                 "reference_cached": cached,
+                "reference_source": reference_source,
                 "sample_rate": state.model.sr,
             })
         except Exception as error:  # noqa: BLE001 - service errors belong to the client
@@ -255,8 +272,13 @@ def main() -> int:
                              "and more likely to mangle a word")
     parser.add_argument("--repetition-penalty", type=float,
                         default=float(os.environ.get("CHATTERBOX_REPETITION_PENALTY", "1.2")))
+    parser.add_argument("--default-reference", default=os.environ.get(
+        "CHATTERBOX_DEFAULT_REFERENCE", "/app/edvox/voices/clone/aussie-conv-ref.wav"),
+        help="voice used when a session has not uploaded its own reference; the natural "
+             "clone clip, not aussie-ref.wav, which Phase 0 found to be a caricature")
     parser.add_argument("--warmup-reference", default=os.environ.get("TTS_WARMUP_REFERENCE", ""),
-                        help="prepare this reference clip at startup so turn one is warm")
+                        help="prepare this reference clip at startup so turn one is warm "
+                             "(defaults to --default-reference)")
     parser.add_argument("--reference-cache-size", type=int,
                         default=int(os.environ.get("TTS_REFERENCE_CACHE_SIZE", "4")))
     parser.add_argument("--allow-roots", default=os.environ.get("TTS_ALLOW_ROOTS", DEFAULT_ALLOW_ROOTS))
@@ -292,9 +314,21 @@ def main() -> int:
     state = State(model, args.model, device, min(max(args.exaggeration, 0.0), 2.0),
                   args.reference_cache_size, allow_roots,
                   default_temperature=min(max(args.temperature, 0.1), 1.5),
-                  default_repetition_penalty=max(args.repetition_penalty, 1.0))
-    if args.warmup_reference:
-        warm = Path(args.warmup_reference).expanduser()
+                  default_repetition_penalty=max(args.repetition_penalty, 1.0),
+                  default_reference=args.default_reference.strip())
+    warm_target = args.warmup_reference.strip() or state.default_reference
+    if state.default_reference:
+        default_path = Path(state.default_reference).expanduser()
+        # Loud, not fatal: an absent default is a misconfiguration that would otherwise show
+        # up as a 500 on the first voiceless session, hours after the deploy looked fine.
+        if not default_path.is_file():
+            print(f"chatterbox-server: WARNING default reference {default_path} is not a file; "
+                  "sessions without an uploaded voice will fail", file=sys.stderr, flush=True)
+        elif not state.within_allow_list(default_path):
+            print(f"chatterbox-server: WARNING default reference {default_path} is outside "
+                  "TTS_ALLOW_ROOTS; requests using it will be refused", file=sys.stderr, flush=True)
+    if warm_target:
+        warm = Path(warm_target).expanduser()
         if warm.is_file() and state.within_allow_list(warm):
             t0 = time.monotonic()
             state.use_reference(warm, state.default_exaggeration)

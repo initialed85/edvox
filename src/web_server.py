@@ -95,16 +95,32 @@ def tts_url_for(backend: str) -> str:
     """
     if backend in CLI_BACKENDS:
         raise ValueError(f"backend {backend!r} runs as a local subprocess and has no URL")
-    legacy = env("TTS_URL", "").strip().rstrip("/")
+    own = env(_url_var(backend), "").strip()
+    if own:
+        return own.rstrip("/")
+    # The legacy shared TTS_URL names whichever service a deployment is actually running, so
+    # it is only honest for the default backend. Falling back for every backend made /health
+    # report "audiocpp: ok" while audiocpp was pointed at the Qwen daemon - a green checkmark
+    # for a service that does not exist.
+    # chatterbox-turbo / -nano / -plain are one service, so they share the "chatterbox" port.
+    port_key = "chatterbox" if backend in CHATTERBOX_BACKENDS else backend
+    default = BACKEND_DEFAULT_PORTS[port_key]
+    try:
+        is_default = normalize_backend(env("WEB_DEFAULT_TTS_BACKEND", "chatterbox")) == backend
+    except ValueError:
+        is_default = False
+    if is_default:
+        return (env("TTS_URL", "").strip() or f"http://127.0.0.1:{default}").rstrip("/")
+    return f"http://127.0.0.1:{default}".rstrip("/")
+
+
+def _url_var(backend: str) -> str:
+    """The dedicated env var name for one backend's base URL."""
     if backend in CHATTERBOX_BACKENDS:
-        var, default = "TTS_URL_CHATTERBOX", "http://127.0.0.1:8190"
-    elif backend in BACKEND_DEFAULT_PORTS:
-        var, default = f"TTS_URL_{backend.upper().replace('-', '_')}", (
-            f"http://127.0.0.1:{BACKEND_DEFAULT_PORTS[backend]}"
-        )
-    else:
-        raise ValueError(f"unsupported TTS backend: {backend}")
-    return (env(var, "").strip() or legacy or default).rstrip("/")
+        return "TTS_URL_CHATTERBOX"
+    if backend in BACKEND_DEFAULT_PORTS:
+        return f"TTS_URL_{backend.upper().replace('-', '_')}"
+    raise ValueError(f"unsupported TTS backend: {backend}")
 
 
 def cue_policy_sentence() -> str:
