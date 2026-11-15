@@ -106,3 +106,27 @@ Because time-slicing isolates no memory, the pod caps itself at `CHATTERBOX_CUDA
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` so the allocator shrinks mappings instead
 of parking blocks. Rollback is two values in the manifest: image back to `0.1.7` and
 `CHATTERBOX_DEVICE` back to `cpu`.
+
+### What the pod itself measured, on the same day
+
+The table above was taken outside the cluster. After the changeover landed on
+`edvox-tts-chatterbox` in `home-dev`, the shipping path measured:
+
+| | outside the cluster | inside the pod |
+|---|---|---|
+| model load cold | 6.9 s | 7.8 s |
+| reference conditioning, first time | 10.3 s | 9.9 s |
+| synthesis | 3.1 s for 9.16 s (RTF 0.34) | 2.11 s for 5.72 s (**RTF 0.37**) |
+| VRAM held | 3304 MiB reserved | 3308-3328 MiB, released to 732 MiB on pod deletion |
+
+and one real turn through `POST /api/chat` on `edvox-web` - chat plus speech, not speech alone -
+came back in **1.87 s total** (`chat_ms` 417, `tts_ms` 1457 for 4.16 s of audio) against the
+8.7-13.3 s the CPU build used to spend. `nvidia-smi` during that turn showed our context at
+3308 MiB alongside the three camry detector contexts at 240 MiB each, 3744 MiB still free, and
+deleting the validation pod returned the card to 732 MiB with nothing left attributed, so the
+allocator bound and the exit path both behave.
+
+The one thing this deployment owes: `0.1.7-cuda` is only in august-desktop's docker store, so
+the manifest runs `imagePullPolicy: IfNotPresent` until the Docker Hub upload - capped near
+200 KiB/s by the registry's 60 KiB receive window at 246 ms RTT - finally publishes the tag.
+Until then a store wipe on that node has no upstream image to recover from.
