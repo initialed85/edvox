@@ -94,10 +94,12 @@ camry `object_detector` contexts (240 MiB each) are already using. So the defaul
 argue about). Widening is bounded to 30 s regardless, because references enrolled through the browser
 are deliberately uncapped and an unbounded window on a time-sliced shared GPU is how the pod dies.
 
-Honest caveat: the one GPU run of the widened variant scored 12/12 with 0 leaks on these same 12
-lines, where the CPU head-to-head scored it 11/12. Twelve lines does not separate the two on
-faithfulness; it does show the un-widened variant does not leak, and it is strictly cheaper in VRAM,
-which is why that is what ships.
+Honest caveat: on the GPU, the *widened* variant scored 12/12 with 0 leaks on these same 12 lines
+(image `0.1.7.1-cuda`), where the CPU head-to-head scored it 11/12. Twelve lines does not separate
+the two variants on faithfulness. What separates them is VRAM and the CPU head-to-head, so the
+un-widened variant ships - and it has since been measured on the GPU too (`0.1.7.2-cuda`): 12/12
+faithful, 0 leaks, 0 garbled, RTF 0.29, 3328 MiB for our container (4100 MiB peak on the card,
+which includes camry's three 240 MiB detector contexts).
 
 An earlier version of this document quoted cosine 0.890 raw / 0.859 at 3 s / 0.845 at 8 s. Those
 numbers were computed against the raw reference clip over *all* renders, including the ones that
@@ -129,10 +131,19 @@ docker run --rm -v $PWD/tests:/t:ro -v $PWD/src:/src:ro \
   initialed85/edvox-tts-chatterbox:0.1.7.2-cuda python3 -m unittest discover -s /t -v
 ```
 
-## Rollback
+## Rollback ladder
 
-`CHATTERBOX_REF_LEAD_SILENCE="0"` on the same image restores the old conditioning exactly. Image
-rollback is `0.1.7-cuda` (padding, widened window) or `0.1.7` + `CHATTERBOX_DEVICE=cpu`.
+1. `CHATTERBOX_REF_LEAD_SILENCE="0"` on the running image - restores the old conditioning exactly,
+   nothing else changes.
+2. `CHATTERBOX_REF_WIDEN_DECODER_WINDOW=true` - the previous image's behaviour (8 s pad with the
+   voice-decoder window widened to cover it), for 420 MiB more on the card.
+3. Image `0.1.7.1-cuda` - that behaviour baked in.
+4. Image `0.1.7-cuda` - GPU, no padding at all: the state that leaked.
+5. Image `0.1.7` with `CHATTERBOX_DEVICE=cpu` - the only tag that actually exists on Docker Hub.
+
+Steps 2-5 need the tag to still be in the node's docker store; only step 5 can survive a store wipe
+until the CUDA tags are published upstream. See `docs/tts-sizing.md` for the current debt and the
+NAS copy of `0.1.7.2-cuda` that covers a store wipe without the hub.
 
 ## Open questions
 

@@ -130,3 +130,20 @@ The one thing this deployment owes: `0.1.7-cuda` is only in august-desktop's doc
 the manifest runs `imagePullPolicy: IfNotPresent` until the Docker Hub upload - capped near
 200 KiB/s by the registry's 60 KiB receive window at 246 ms RTT - finally publishes the tag.
 Until then a store wipe on that node has no upstream image to recover from.
+
+### Same card, after the reference-conditioning fix (2026-11-15, later in the day)
+
+The leak fix changed the image twice more. Both variants ran the same 12 lines through the
+shipping path - the four prompts that leaked in Ed's session plus eight ordinary sentences - and
+each output was transcribed back through `edvox-whisper` and compared with the text meant to be
+spoken:
+
+| image | faithful | generation time | card memory while producing |
+|---|---|---|---|
+| `0.1.7.1-cuda` (8 s silence pad, voice-decoder window widened to cover it) | 12/12, 0 leaks | 1.23 s mean, RTF 0.37 | 3750 MiB peak; 3351 MiB resident afterwards |
+| `0.1.7.2-cuda` (8 s silence pad, decoder window left at the library default) | **12/12, 0 leaks, 0 garbled** | 1.45 s mean, max 2.07 s, RTF 0.29 | 4100 MiB peak on the card, which includes camry's three 240 MiB detector contexts |
+
+`0.1.7.2-cuda` is what runs. The widened variant is the one that measured 420 MiB heavier for our
+container, and un-widened is the one that ships. Mechanism and reasoning:
+[docs/tts-reference-conditioning.md](tts-reference-conditioning.md). Tags now sitting only in
+docker stores rather than on Docker Hub: `0.1.7-cuda`, `0.1.7.1-cuda`, `0.1.7.2-cuda`.

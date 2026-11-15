@@ -26,6 +26,24 @@ The llama.cpp build inside `docker/Dockerfile.tts` is pinned to
 measured on it. Bump deliberately and re-measure: the codec stage is where a regression
 hides.
 
+### If august-desktop's docker store loses the CUDA image
+
+The Chatterbox CUDA image is 3.64 GB. The tags are published on Docker Hub, but re-pulling 3.64 GB
+over this house's upstream link during an outage is not something to attempt under pressure, so a
+flat copy of the shipping image also lives on the `edvox-data` PVC, which is NFS-backed and therefore
+lives on the NAS rather than on the node:
+
+```sh
+# on august-desktop - find where the PVC is mounted, then load from it
+M=$(grep -m1 pvc-aa431866 /proc/mounts | cut -d' ' -f2)
+sudo docker load -i "$M/image-backups/edvox-tts-chatterbox-0.1.7.2-cuda.tar"
+# Loaded image: initialed85/edvox-tts-chatterbox:0.1.7.2-cuda   -> id da6fb5d8ba7f, same as the hub tag
+```
+
+On the NAS itself the file is `192.168.1.25:/storage-hdd/pvc-aa431866-4ed9-4e5f-b79d-dfd649747207/image-backups/`,
+so the copy survives the node entirely. It was made with `docker save <tag> -o $M/image-backups/...tar`
+and load-tested back into the store to confirm it yields the same image id.
+
 ## Why there is a daemon at all
 
 `llama-tts` is one-shot. Every utterance pays model load, mmproj load and graph setup,
