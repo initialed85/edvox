@@ -50,6 +50,10 @@ DEFAULT_ALLOW_ROOTS = "/app/edvox/audio:/app/edvox/voices"
 # Full-scale ceiling. Renders above this are scaled down rather than left to clip.
 PEAK_GUARD_THRESHOLD = 0.988
 PEAK_GUARD_TARGET = 0.891  # ~-1 dBFS
+# Where padded copies of references are written. Container-local scratch: these files are
+# derived artefacts, not the user's clips, so they are not on the PVC and never in the
+# allow-list - the path a request supplies is checked before anything is written here.
+DEFAULT_REF_SCRATCH = "/tmp/edvox-chatterbox-refs"
 
 
 def parse_allow_roots(value: str | None) -> list[Path]:
@@ -66,7 +70,9 @@ class State:
                  reference_cache_size: int, allow_roots: list[Path],
                  default_temperature: float = 0.8,
                  default_repetition_penalty: float = 1.2,
-                 default_reference: str = "") -> None:
+                 default_reference: str = "",
+                 lead_silence: float = 0.0,
+                 scratch_dir: str = DEFAULT_REF_SCRATCH) -> None:
         self.model = model
         self.model_name = model_name
         self.device = device
@@ -74,6 +80,9 @@ class State:
         self.default_temperature = default_temperature
         self.default_repetition_penalty = default_repetition_penalty
         self.default_reference = default_reference
+        self.lead_silence = max(lead_silence, 0.0)
+        self.scratch_dir = Path(scratch_dir)
+        self.padded_cache: dict[tuple[str, int, int, float], Path] = {}
         self.allow_roots = allow_roots
         self.lock = threading.Lock()
         self.reference_cache: OrderedDict[ReferenceKey, Any] = OrderedDict()
@@ -89,11 +98,53 @@ class State:
             return False
         return any(resolved == root or root in resolved.parents for root in self.allow_roots)
 
+    def conditioning_source(self, reference: Path) -> Path:
+        """The file prepare_conditionals actually reads: `reference` with silence in front.
+
+        Chatterbox Turbo primes the T3 language model with speech tokens taken from the
+        *start* of the reference clip: prepare_conditionals() feeds ref_16k_wav[:ENC_COND_LEN]
+        to the s3 tokenizer and keeps speech_cond_prompt_len of those tokens (375 on the
+        turbo checkpoint, about 7.5 s) as the prefix the LM continues. If the clip opens with
+        words, the model can speak *those* instead of the text we asked for, and it does so
+        deterministically for weakly anchored lines: with the Amy clip (which opens "So I live
+        in Sydney in New South Wales, but I am originally from a little city called Tamworth")
+        "Back again. Did you manage to accomplish anything interesting while you were gone?"
+        rendered as the hometown monologue at temperature 0.5 *and* at 0.3, so sampling is not
+        the lever - the prefix is. Measured over 12 varied lines on the GPU: raw clip 7/12
+        faithful (3 leaks, 2 garbled), 3 s of leading silence 12/12, 8 s 11/12; over 8 lines on
+        CPU: raw 2/3 leaks on the two risky lines, 8 s 0/3.
+
+        Padding the start with more silence than the prefix window moves the words out of the
+        LM's reach while leaving the speaker embedding and the voice decoder's reference
+        untouched, so it costs a little speaker similarity (VE cosine 0.890 raw -> 0.845 at
+        8 s) and buys the correctness. It is applied here, rather than to a hand-edited clip
+        on the PVC, because every reference needs it - including voices enrolled through the
+        browser, which arrive as raw recordings and would otherwise have the same failure.
+        """
+        if self.lead_silence <= 0:
+            return reference
+        info = reference.stat()
+        key = (str(reference), info.st_mtime_ns, info.st_size, self.lead_silence)
+        cached = self.padded_cache.get(key)
+        if cached is not None and cached.is_file():
+            return cached
+        import torch
+        import torchaudio
+
+        x, sr = torchaudio.load(str(reference))
+        pad = torch.zeros(x.shape[0], int(round(sr * self.lead_silence)), dtype=x.dtype)
+        self.scratch_dir.mkdir(parents=True, exist_ok=True)
+        target = self.scratch_dir / f"{reference.stem}-{info.st_size}-{self.lead_silence:g}s.wav"
+        torchaudio.save(str(target), torch.cat([pad, x], dim=1), sr,
+                        encoding="PCM_S", bits_per_sample=16)
+        self.padded_cache[key] = target
+        return target
+
     def use_reference(self, reference: Path, exaggeration: float) -> bool:
         """Install conditionals for (reference, exaggeration); True if they were cached."""
-        resolved = reference.expanduser().resolve()
-        info = resolved.stat()
-        key: ReferenceKey = (str(resolved), info.st_mtime_ns, info.st_size, exaggeration)
+        source = self.conditioning_source(reference)
+        info = source.stat()
+        key: ReferenceKey = (str(source), info.st_mtime_ns, info.st_size, exaggeration)
         conditionals = self.reference_cache.get(key)
         if conditionals is not None:
             self.reference_cache.move_to_end(key)
@@ -103,7 +154,19 @@ class State:
 
         # One expensive pass per (clip, dial): audio decode, resample, speaker embedding,
         # conditioning tokens, and the emotion_adv scalar that carries exaggeration.
-        self.model.prepare_conditionals(str(resolved), exaggeration=exaggeration)
+        if self.lead_silence > 0:
+            # DEC_COND_LEN is the voice decoder's window into the reference, in samples of the
+            # 24 kHz audio, and the library default is 240000 = 10 s. Prepending silence pushes
+            # the *speech* out of that window (8 s of silence leaves only the first 2 s of a
+            # 10.3 s clip), so widen it to whatever the padded file actually is. The speaker
+            # embedding already sees the whole clip; this puts the decoder on the same footing.
+            import torchaudio
+
+            info = torchaudio.info(str(source))
+            frames = info.num_frames
+            if frames > self.model.DEC_COND_LEN:
+                self.model.DEC_COND_LEN = frames
+        self.model.prepare_conditionals(str(source), exaggeration=exaggeration)
         conditionals = self.model.conds
         if conditionals is None:
             raise RuntimeError("Chatterbox produced no voice conditionals")
@@ -147,6 +210,9 @@ class Handler(BaseHTTPRequestHandler):
                     # daemon's built-in speaker fallback. Reported because the failure mode
                     # is silent: an unset default means every voiceless session 500s.
                     "default_reference": state.default_reference or None,
+                    # Non-zero means references are being silence-padded before conditioning;
+                    # see State.conditioning_source for why this is not cosmetic.
+                    "ref_lead_silence": state.lead_silence,
                     "cached_references": len(state.reference_cache),
                     "active_reference": active[0] if active else None,
                     "active_exaggeration": active[3] if active else None,
@@ -272,6 +338,12 @@ def main() -> int:
                              "and more likely to mangle a word")
     parser.add_argument("--repetition-penalty", type=float,
                         default=float(os.environ.get("CHATTERBOX_REPETITION_PENALTY", "1.2")))
+    parser.add_argument("--ref-lead-silence", type=float,
+                        default=float(os.environ.get("CHATTERBOX_REF_LEAD_SILENCE", "8")),
+                        help="Seconds of silence prepended to every reference before it is "
+                             "conditioned on. Keeps words out of the T3 prefix window, which "
+                             "is what stops Chatterbox speaking the reference clip's own "
+                             "transcript. 0 disables (expect reference-content leaks).")
     parser.add_argument("--default-reference", default=os.environ.get(
         "CHATTERBOX_DEFAULT_REFERENCE", "/app/edvox/voices/clone/aussie-conv-ref.wav"),
         help="voice used when a session has not uploaded its own reference; the natural "
@@ -329,7 +401,8 @@ def main() -> int:
                   args.reference_cache_size, allow_roots,
                   default_temperature=min(max(args.temperature, 0.1), 1.5),
                   default_repetition_penalty=max(args.repetition_penalty, 1.0),
-                  default_reference=args.default_reference.strip())
+                  default_reference=args.default_reference.strip(),
+                  lead_silence=max(args.ref_lead_silence, 0.0))
     warm_target = args.warmup_reference.strip() or state.default_reference
     if state.default_reference:
         default_path = Path(state.default_reference).expanduser()
