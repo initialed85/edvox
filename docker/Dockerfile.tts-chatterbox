@@ -1,0 +1,42 @@
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# One Dockerfile, two wheels, chosen at build time. CPU is what shipped first; CUDA is:
+#
+#   docker build -f docker/Dockerfile.tts-chatterbox \
+#     --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu124 \
+#     --build-arg DEFAULT_DEVICE=cuda -t ...:0.1.7-cuda .
+#
+# Why cu124: it is what torch 2.6.0 resolves to on this wheel line and it ran on august-desktop
+# (RTX 2080 SUPER, driver 595.99.02, sm_75) end to end. Measured there, fp32:
+#   VRAM peak 3159 MiB allocated / 3304 MiB reserved
+#   9.16 s of audio in 3.1 s (RTF 0.34)   vs CPU 5.4 s in 13.1 s (RTF 2.4)  -> ~7x
+# fp16 would halve that footprint and is NOT available: 0.1.7 exposes no half= for Turbo and
+# casting t3/s3gen/ve by hand dies with "RuntimeError: Unsupported dtype Half".
+#
+# The device default is baked in per-variant so a CUDA image cannot silently fall back to CPU
+# on a GPU node; CHATTERBOX_DEVICE in the deployment still overrides it.
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+ARG DEFAULT_DEVICE=cpu
+RUN pip install --index-url ${TORCH_INDEX} torch
+ENV CHATTERBOX_DEVICE=${DEFAULT_DEVICE}
+
+# Pinned: 0.1.7 is the version whose from_local() signature and 19-token Turbo tag
+# vocabulary were measured in docs/tts-phase0-results.md. The 0.1.x line changes the
+# loader between minors, so an unpinned install can fail to read a cached checkpoint.
+RUN pip install "chatterbox-tts==0.1.7" huggingface_hub
+
+# ROOT is derived as parents[1] of src/chatterbox_server.py, so the source has to sit at
+# /app/edvox/src for the default paths to line up with TTS_ALLOW_ROOTS.
+WORKDIR /app/edvox
+COPY src/ /app/edvox/src/
+COPY docker/entrypoint-tts-chatterbox.sh /entrypoint.sh
+RUN mkdir -p /models /app/edvox/audio /app/edvox/voices && chmod +x /entrypoint.sh
+
+EXPOSE 8190
+ENTRYPOINT ["/entrypoint.sh"]

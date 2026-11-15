@@ -82,3 +82,26 @@ TTS model: the measured A/B harness, the listening gate that belongs to Ed, the 
 plumbing fixes required first (per-backend `TTS_URL_*`, one cue-support map), the
 deployment shape for each candidate, and the rollback. Written to be executed by an agent
 with no prior context — execute the phases in order and do not substitute the decision.
+
+### Chatterbox has two wheel variants of the same image
+
+`docker/Dockerfile.tts-chatterbox` builds either one from a single file:
+
+```sh
+# CPU wheel, tag 0.1.7 - what shipped first, and the rollback
+docker build -f docker/Dockerfile.tts-chatterbox -t docker.io/initialed85/edvox-tts-chatterbox:0.1.7 .
+# CUDA wheel, tag 0.1.7-cuda - what august-desktop runs now on its RTX 2080 SUPER
+docker build -f docker/Dockerfile.tts-chatterbox \
+  --build-arg TORCH_INDEX=https://download.pytorch.org/whl/cu124 \
+  --build-arg DEFAULT_DEVICE=cuda \
+  -t docker.io/initialed85/edvox-tts-chatterbox:0.1.7-cuda .
+```
+
+The device is baked into each variant via `CHATTERBOX_DEVICE` so a CUDA image cannot silently
+serve CPU on a GPU node, and the deployment states it again so `kubectl get deploy -o yaml`
+shows the value that decides where synthesis runs. Moving between the two is those **two
+values** in `home-ops` `clusters/dev/applications/edvox/deployment-tts-chatterbox.yaml` — image
+tag and `CHATTERBOX_DEVICE` — nothing else. The deployment is `strategy: Recreate`, so a
+rollout leaves a gap of roughly a minute while the new pod loads weights (6.9 s on the 2080
+SUPER) and conditions the warm-up reference (10.3 s). Measured footprint, the 7x speed-up and
+the fp16 dead end are in `docs/tts-sizing.md`.

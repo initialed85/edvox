@@ -279,6 +279,9 @@ def main() -> int:
     parser.add_argument("--warmup-reference", default=os.environ.get("TTS_WARMUP_REFERENCE", ""),
                         help="prepare this reference clip at startup so turn one is warm "
                              "(defaults to --default-reference)")
+    parser.add_argument("--cuda-memory-fraction", type=float, default=float(os.environ.get(
+        "CHATTERBOX_CUDA_MEM_FRACTION", "0.55")),
+        help="fraction of the GPU to allow this process on a cuda device; 0 disables the cap")
     parser.add_argument("--reference-cache-size", type=int,
                         default=int(os.environ.get("TTS_REFERENCE_CACHE_SIZE", "4")))
     parser.add_argument("--allow-roots", default=os.environ.get("TTS_ALLOW_ROOTS", DEFAULT_ALLOW_ROOTS))
@@ -302,6 +305,17 @@ def main() -> int:
     if device == "mps" and not torch.backends.mps.is_available():
         print("chatterbox-server: MPS unavailable, using CPU", file=sys.stderr, flush=True)
         device = "cpu"
+    if device.startswith("cuda") and args.cuda_memory_fraction > 0:
+        # This card is shared by device-plugin *time-slicing*, which partitions nothing: every
+        # pod on it sees the whole GPU and whoever allocates last is the one that dies. So the
+        # ceiling is stated rather than left to torch growing into whatever happens to be free
+        # - august-desktop's card reached 7605/8192 MiB used with only 817 MiB attributable to
+        # any process, and a reboot was what cleared it. Measured Chatterbox peak is 3159 MiB
+        # allocated / 3304 MiB reserved; 0.55 of 8192 MiB is 4.5 GiB, which leaves room for
+        # activations on a long sentence without claiming the card.
+        torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction)
+        print(f"chatterbox-server: capping this process at {args.cuda_memory_fraction:.2f} "
+              f"of GPU memory", file=sys.stderr, flush=True)
     print(f"chatterbox-server: loading Chatterbox {args.model} on {device} "
           f"(exaggeration {args.exaggeration})...", file=sys.stderr, flush=True)
     started = time.monotonic()

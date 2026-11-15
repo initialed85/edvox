@@ -57,3 +57,52 @@ existing `sentiment-analyzer` llama-server on `hermes` did 80-89 tok/s on this a
   image, `llama-tts-cuda` binary, `nvidia.com/gpu` resource request). That is the one open
   engineering task, and it is worth re-running this table on the GPU before trusting any
   predicted speed-up.
+
+## Measured on the GPU, 2026-11-15 — and two corrections to the above
+
+**The desktop session is not holding 5.7 GB of the card.** With root, `nvidia-smi`'s full
+process table — which does include type `G`, graphics clients — attributes **817 MiB** on
+august-desktop: three camry object-detector contexts at 240 MiB each, plus gnome-shell at
+97 MiB. Killing one detector's context from the host took `memory.used` 813 → 573 MiB and
+back 45 s later when the container restarted it, so 240 MiB is exactly what each costs.
+Chrome and its GPU process never appear on the NVIDIA card at all: this box is a 5600G with
+a Cezanne Vega iGPU (`card1`), and the monitor is on the NVIDIA HDMI (`card2-HDMI-A-2`).
+
+What *is* true is that the card reached **7605/8192 MiB used** with only that 817 MiB
+attributable — ~6.8 GiB of VRAM no process would name — and a **reboot** was what cleared it,
+not any pod restart. Unexplained, and the leading suspect is orphaned contexts from container
+churn on the node (the nvidia-device-plugin pod there has 10 restarts, persistence mode off,
+driver 595.99.02). `/usr/local/bin/gpu-watch.sh`, run every minute by `/etc/cron.d/gpu-watch`,
+now logs total-vs-attributed so the next occurrence shows what grows instead of being guessed
+at after a reboot destroys the evidence.
+
+**The CUDA work was not a llama.cpp task**, because the shipping backend is Chatterbox, and
+that service already took a device: `CHATTERBOX_DEVICE=cuda` is the whole change (plus the
+CUDA torch wheel in the image and an `nvidia.com/gpu` request). Measured on this node's
+**RTX 2080 SUPER**, 8192 MiB, driver 595.99.02, torch 2.6.0+cu124 (`sm_75` in the arch list):
+
+| | CPU (5600G, 8 threads) | GPU (RTX 2080 SUPER) |
+|---|---|---|
+| wall clock per turn | 13.1 s for 5.4 s of audio | 3.1 s for 9.16 s of audio |
+| RTF | 2.4 | **0.34** |
+| model load | resident, ~40 s cold | 6.9 s cold |
+| first `prepare_conditionals` | 11.6 s | 10.3 s |
+| VRAM | n/a | **3159 MiB peak, 3304 MiB reserved** |
+
+Roughly **7x** faster per turn, which is the difference between a 13 s tail and a 3 s one.
+Note the conditioning step barely moved: it is reference-file decode and encoder work, most of
+which is not the GEMM bulk, so paying 10.3 s once at boot still matters.
+
+fp16 would have halved the footprint and **is not available**: `from_local()` in
+chatterbox-tts 0.1.7 takes only `(ckpt_dir, device)` with no `half=` for Turbo, and casting
+`t3`/`s3gen`/`ve` by hand fails inside generation with `RuntimeError: Unsupported dtype Half`.
+Load order also matters: `from_local(dir, "cuda")` sets the wrapper's own `.device`, which is
+what `generate()`/`prepare_conditionals()` use to place their tensors — loading on CPU and
+then moving the submodules leaves the wrapper feeding CPU inputs to GPU weights
+(`Input type (FloatTensor) and weight type (cuda.FloatTensor) should be the same`).
+
+Because time-slicing isolates no memory, the pod caps itself at `CHATTERBOX_CUDA_MEM_FRACTION`
+(0.55 = 4.5 GiB against that 3.3 GiB peak) and runs with
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` so the allocator shrinks mappings instead
+of parking blocks. Rollback is two values in the manifest: image back to `0.1.7` and
+`CHATTERBOX_DEVICE` back to `cpu`.
