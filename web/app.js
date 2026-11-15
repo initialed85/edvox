@@ -5,6 +5,10 @@ const VOX_AUDIO_CONSTRAINTS = {
   channelCount: 1,
 };
 
+// A 44-byte header and no samples. Played through the shared answer element inside the tap
+// that starts the session, which is what makes iOS allow the later play() of a real answer.
+const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';
+
 // Silero VAD handles speech probability, hysteresis, pre-roll, and endpointing.
 // These are deliberately a little more relaxed than the former RMS detector so
 // natural pauses do not split an utterance too eagerly.
@@ -45,6 +49,13 @@ const state = {
   visitId: crypto.randomUUID(),
   returnGreetingPending: true,
   pageWasHidden: false,
+  // The one capture stream for the session. vad-web's defaults STOP the tracks on pause and
+  // re-run getUserMedia on resume; this app pauses the detector on every turn, so that pairing
+  // means a permission prompt mid-conversation. Caching the stream is what stops that.
+  stream: null,
+  answerAudio: null,
+  gestureArmed: false,
+  tapAttempts: 0,
 };
 
 const orb = document.getElementById('status-orb');
@@ -54,7 +65,8 @@ const errorBox = document.getElementById('error');
 function setPhase(phase, message) {
   state.voxPhase = phase;
   orb.className = `status-orb ${phase}`;
-  orb.setAttribute('aria-label', phase === 'off' || phase === 'error' ? 'Start listening' : 'Listening');
+  orb.setAttribute('aria-label',
+    phase === 'off' || phase === 'error' || phase === 'needs-tap' ? 'Start listening' : 'Listening');
   status.textContent = message;
 }
 
@@ -104,7 +116,7 @@ async function requestReturnGreeting() {
     });
     if (!result.skipped && !result.no_reply && result.audio_url) {
       setPhase('speaking', 'Speaking…');
-      await waitForPlayback(new Audio(result.audio_url));
+      await playAnswer(result.audio_url);
     }
   } catch (error) {
     state.returnGreetingPending = true;
@@ -122,7 +134,11 @@ function microphoneError(error) {
     if (window.isSecureContext === false) {
       return new Error('Microphone access requires HTTPS. Open the secure voice URL, or use localhost.');
     }
-    return new Error('Microphone permission was denied. Allow microphone access for this site and tap the light to retry.');
+    // NeedsTapError rather than a plain Error so the handlers can tell "the browser wants a
+    // gesture / the user said no" apart from a network or server failure. The old code returned
+    // an untyped Error here, which is why every iOS refusal came out as a red box that killed
+    // the session mid-answer.
+    return new NeedsTapError('Microphone permission was denied. Allow microphone access for this site and tap the light to retry.');
   }
   if (error?.name === 'NotFoundError') return new Error('No microphone was found on this device.');
   if (error?.name === 'NotReadableError') return new Error('The microphone is busy or unavailable.');
@@ -132,13 +148,74 @@ function microphoneError(error) {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+// The microphone is gone and no API call can bring it back without a user gesture, so the app
+// goes quiet and waits on the orb instead of tearing the session down with a red error box.
+// markNeedsTap deliberately does NOT stop the cached tracks: if the interruption was benign the
+// next tap reuses the same stream and never prompts again.
+function markNeedsTap(message) {
+  state.voxEnabled = false;
+  state.busy = false;
+  state.voxPausedForWork = false;
+  setPhase('needs-tap', message || 'Tap the light to keep listening');
+}
+
+// Raised when capture cannot be resumed programmatically. Named distinctly from the browser's
+// own NotAllowedError so the two are not confused in the handlers, but handled identically.
+class NeedsTapError extends Error {
+  constructor(message) {
+    super(message || 'Tap the light to keep listening');
+    this.name = 'NeedsTap';
+  }
+}
+
+// All of these mean the same thing on a phone: the browser will only hand over a microphone
+// from within a tap, and we are not in one right now.
+function isNeedsTap(error) {
+  return error?.name === 'NeedsTap'
+    || error?.name === 'NotAllowedError'
+    || error?.name === 'SecurityError';
+}
+
+function liveTrack(stream) {
+  return stream?.getAudioTracks().find((track) => track.readyState === 'live') || null;
+}
+
+function setCaptureEnabled(stream, enabled) {
+  stream?.getAudioTracks().forEach((track) => { track.enabled = enabled; });
+}
+
 async function getMicrophone() {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) throw microphoneError();
+  // Reuse the session's stream. Every call that does not need to reach the hardware is a call
+  // that cannot prompt, cannot be rejected for want of a gesture, and cannot fail mid-answer.
+  // Re-enabling here matters because vad-web's destroy() routes through pauseStream, so a
+  // rebuilt detector would otherwise be handed a stream whose tracks are still muted.
+  if (liveTrack(state.stream)) {
+    setCaptureEnabled(state.stream, true);
+    return state.stream;
+  }
   try {
     const stream = await navigator.mediaDevices.getUserMedia({audio: VOX_AUDIO_CONSTRAINTS});
-    stream.getAudioTracks().forEach((track) => track.applyConstraints(VOX_AUDIO_CONSTRAINTS).catch(() => {}));
+    const track = liveTrack(stream);
+    if (!track) {
+      // Safari will sometimes hand back a stream whose track has already ended. Accepting it
+      // means listening to nothing forever, silently.
+      stream.getTracks().forEach((t) => t.stop());
+      throw new NeedsTapError('The browser released the microphone straight away. Tap the light to try again.');
+    }
+    state.stream = stream;
+    stream.getAudioTracks().forEach((t) => {
+      t.applyConstraints(VOX_AUDIO_CONSTRAINTS).catch(() => {});
+      // A hardware interruption - an incoming call, Siri, another app, or iOS swapping the
+      // audio session when the answer starts playing - ends the track. Nothing can restart it
+      // without a gesture, so say so rather than pretending to listen.
+      t.addEventListener('ended', () => {
+        if (state.voxEnabled && state.stream === stream) markNeedsTap();
+      }, {once: true});
+    });
     return stream;
   } catch (error) {
+    if (error instanceof NeedsTapError) throw error;
     throw microphoneError(error);
   }
 }
@@ -192,7 +269,19 @@ async function createVad() {
     baseAssetPath: '/vendor/vad/',
     onnxWASMBasePath: '/vendor/ort/',
     getStream: getMicrophone,
-    resumeStream: getMicrophone,
+    // The pair that keeps the microphone allocated for the whole conversation. vad-web calls
+    // pauseStream() from pause() and resumeStream(oldStream) from start(), and its defaults
+    // stop the tracks and re-run getUserMedia. Muting instead of stopping means resume hands
+    // back the SAME live stream, so after the one tap that started the session there is no
+    // second permission request anywhere in a turn.
+    pauseStream: async (stream) => setCaptureEnabled(stream, false),
+    resumeStream: async (previous) => {
+      const stream = liveTrack(previous) ? previous : state.stream;
+      if (!liveTrack(stream)) throw new NeedsTapError();
+      setCaptureEnabled(stream, true);
+      state.stream = stream;
+      return stream;
+    },
     onSpeechStart: () => {
       if (state.voxEnabled && !state.busy) setPhase('recording', 'Listening…');
     },
@@ -229,14 +318,67 @@ async function resumeVoxAfterWork() {
     state.busy = false;
     state.voxEnabled = false;
     await destroyVad();
+    if (isNeedsTap(error)) {
+      // This is the mid-answer failure Ed saw: resume ran getUserMedia from an async
+      // continuation, iOS refused it, and the old handler reported that as "permission was
+      // denied" and killed the session. Retrying the same call would fail the same way, so the
+      // orb carries it instead.
+      markNeedsTap();
+      return;
+    }
     showError(error);
   }
+}
+
+// One element reused for every answer, unlocked inside the tap that started the session: iOS
+// gates media playback on a gesture, so a play() from the continuation of a POST is refused.
+function answerElement() {
+  if (!state.answerAudio) {
+    const audio = new Audio();
+    audio.preload = 'auto';
+    state.answerAudio = audio;
+  }
+  return state.answerAudio;
+}
+
+function unlockPlayback() {
+  const audio = answerElement();
+  audio.src = SILENT_WAV;
+  // Deliberately unchecked: the point is that the element has been played from within a
+  // gesture, not that two frames of silence reached the speaker.
+  audio.play().catch(() => {});
+}
+
+async function playAnswer(url) {
+  if (!url) return;
+  const audio = answerElement();
+  audio.src = url;
+  await waitForPlayback(audio);
 }
 
 async function waitForPlayback(audio) {
   if (!audio) return;
   if (audio.paused) {
-    try { await audio.play(); } catch (_) { return; }
+    try {
+      await audio.play();
+    } catch (_) {
+      // Playback was refused - iOS with an expired gesture, most often. The old code returned
+      // here, which is how a turn could "fail as it goes to answer" with no message and no
+      // speech: the sentence was decoded and simply never played. Queue it for the next touch.
+      await new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          document.removeEventListener('pointerdown', unlock);
+          resolve();
+        }, 20000);
+        const unlock = () => {
+          clearTimeout(timer);
+          document.removeEventListener('pointerdown', unlock);
+          audio.play().then(() => audio.addEventListener('ended', resolve, {once: true})).catch(resolve);
+        };
+        document.addEventListener('pointerdown', unlock, {once: true});
+      });
+      return;
+    }
   }
   if (audio.ended) return;
   await new Promise((resolve) => {
@@ -270,7 +412,7 @@ async function handleAudio(audioSamples) {
     if (result.ignored || result.no_reply) return;
     if (result.audio_url) {
       setPhase('speaking', 'Speaking…');
-      await waitForPlayback(new Audio(result.audio_url));
+      await playAnswer(result.audio_url);
     }
   } catch (error) {
     showError(error);
@@ -300,7 +442,7 @@ async function runAutonomousCheck() {
     });
     if (!result.skipped && !result.no_reply && result.audio_url) {
       setPhase('speaking', 'Speaking…');
-      await waitForPlayback(new Audio(result.audio_url));
+      await playAnswer(result.audio_url);
     }
   } catch (error) {
     showError(error);
@@ -331,6 +473,31 @@ async function requestWakeLock() {
   } catch (_) { /* Screen Wake Lock is deliberately best effort. */ }
 }
 
+// Rebuild the detector graph without touching the microphone. Needed because iOS suspends the
+// AudioContext when the tab is backgrounded and vad-web has no hook to resume it, which would
+// otherwise leave the detector reading silence for the rest of the visit. The capture stream is
+// deliberately kept, so this never prompts.
+async function restartVadGraph() {
+  if (state.vadStarting || !state.voxEnabled || !liveTrack(state.stream)) return;
+  state.vadStarting = true;
+  try {
+    await destroyVad();
+    if (!state.voxEnabled) return;
+    state.vad = await createVad();
+    await state.vad.start();
+    if (state.voxEnabled && state.voxPhase !== 'recording' && state.voxPhase !== 'speaking') {
+      setPhase('active', 'Listening…');
+    }
+  } catch (error) {
+    state.voxEnabled = false;
+    await destroyVad();
+    if (isNeedsTap(error)) markNeedsTap();
+    else showError(error);
+  } finally {
+    state.vadStarting = false;
+  }
+}
+
 async function enableVox() {
   if (state.vadStarting || state.voxEnabled) return;
   errorBox.hidden = true;
@@ -350,6 +517,14 @@ async function enableVox() {
   } catch (error) {
     state.voxEnabled = false;
     await destroyVad();
+    // A gesture-less start at boot is expected to fail on iOS, and a first refusal after a tap
+    // is usually the browser interrupting capture, not the user denying it. Only after two taps
+    // has a permission denial been demonstrated often enough to be worth an error box.
+    if (isNeedsTap(error) && (!state.gestureArmed || state.tapAttempts < 2)) {
+      markNeedsTap(state.gestureArmed ? 'Tap the light to keep listening'
+                                       : 'Tap the light to start listening');
+      return;
+    }
     showError(error);
   } finally {
     state.vadStarting = false;
@@ -369,13 +544,28 @@ function disableVox() {
     detector.pause().catch(() => {});
     detector.destroy().catch(() => {});
   }
+  // This is the only place the capture is actually released: the user ended the conversation,
+  // so give the hardware and the recording indicator back.
+  state.stream?.getTracks().forEach((track) => track.stop());
+  state.stream = null;
+  if (state.answerAudio) {
+    state.answerAudio.pause();
+    state.answerAudio = null;
+  }
   setPhase('off', 'Tap the light to listen');
 }
 
 orb.addEventListener('click', () => {
   // Conversation mode stays locked to VOX. The light is only a permission
   // retry affordance once startup failed; it is not an on/off control.
-  if (!state.voxEnabled) enableVox().catch(showError);
+  if (!state.voxEnabled) {
+    // The tap is the gesture iOS requires for both the microphone and playback, so everything
+    // that needs it happens inside this handler, synchronously where possible.
+    state.gestureArmed = true;
+    state.tapAttempts += 1;
+    unlockPlayback();
+    enableVox().catch(showError);
+  }
 });
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') {
@@ -386,6 +576,9 @@ document.addEventListener('visibilitychange', () => {
       // cookie-scoped conversation.
       state.visitId = crypto.randomUUID();
       state.returnGreetingPending = true;
+      // Returning to the tab on iOS leaves a suspended AudioContext behind, and on Android it
+      // can leave a muted track; rebuild the graph so the orb is not lying about listening.
+      if (state.voxEnabled) void restartVadGraph();
     }
     state.pageWasHidden = false;
     presence('visible').then((result) => {
