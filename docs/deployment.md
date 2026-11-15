@@ -44,6 +44,13 @@ On the NAS itself the file is `192.168.1.25:/storage-hdd/pvc-aa431866-4ed9-4e5f-
 so the copy survives the node entirely. It was made with `docker save <tag> -o $M/image-backups/...tar`
 and load-tested back into the store to confirm it yields the same image id.
 
+Two figures that tie the recovery paths together, both measured on august-desktop on 2026-11-15: the
+tar is 3,639,093,760 bytes and Docker Hub reports the published tag's `full_size` as 3,639,059,797;
+`docker pull initialed85/edvox-tts-chatterbox:0.1.7.2-cuda` on the node returns
+`Digest: sha256:da6fb5d8ba7f…` / "Image is up to date", which is the same id the tar restores to.
+So the hub is the primary source again and the NAS copy is the one that does not depend on this
+house's upstream link.
+
 ## Why there is a daemon at all
 
 `llama-tts` is one-shot. Every utterance pays model load, mmproj load and graph setup,
