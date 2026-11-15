@@ -247,6 +247,51 @@ no browser page is open. The model is invoked on every eligible interval, includ
 user message; it is free to return `<NO_REPLY>` or respond based on the
 available conversation and accumulated quiet-time context.
 
+## Microphone lifetime on a phone
+
+Two platform rules decide the shape of `web/app.js`, and breaking either one produced the
+"it asks for the microphone again every time it answers" failure on an iPhone:
+
+1. **`getUserMedia()` needs a user gesture.** It is refused with `NotAllowedError` when called
+   from the continuation of a `fetch`, and on iOS a permission grant does not outlive the capture
+   session - stopping the tracks means the next `getUserMedia()` prompts again.
+2. **Media playback needs a gesture too**, per element. An `<audio>` element that has never
+   played inside a touch rejects `play()`.
+
+The vendored detector's defaults fight both rules: `pause()` runs `pauseStream`, whose default
+**stops** the tracks, and `start()` runs `resumeStream`, whose default **re-runs**
+`getUserMedia`. The app pauses the detector on every turn (VOX is half-duplex, so it must not
+hear its own answer), which under those defaults ends the capture and re-requests it once per
+sentence. `createVad()` therefore overrides both halves of the pair: `pauseStream` mutes the
+tracks and `resumeStream` hands the same live stream back. One `MediaStream` is cached in
+`state.stream` for the whole visit, and `disableVox()` is the only place the tracks are stopped,
+so the microphone is released exactly when the user ends the conversation.
+
+What remains when capture genuinely cannot continue - an incoming call, Siri, iOS swapping the
+audio session for playback - cannot be fixed by code, because only a tap can restart it. Those
+paths raise `NeedsTapError` and land on the orb ("Tap the light to keep listening", or "Tap to
+hear the answer" when playback was refused) rather than a red error box, which used to announce
+"permission was denied" when nothing had been denied.
+
+Consequences worth knowing about:
+
+- Starting VOX requires one tap per page visit on iOS. `boot()` still attempts a gesture-less
+  start, because it succeeds wherever permissions persist (desktop, Android) and waits quietly
+  for the tap where it does not.
+- Returning to a backgrounded tab rebuilds the detector graph (`restartVadGraph`) but keeps the
+  cached stream, because iOS suspends the `AudioContext` on hide and the library has no hook to
+  resume it; without the rebuild the orb reports "Listening" against a dead graph.
+- `echoCancellation`, `noiseSuppression` and `autoGainControl` stay on, and the track is muted
+  while a turn is in flight, so a held-open microphone cannot pick up the answer.
+
+`tests/browser/` drives the real `app.js` headlessly against a stub that models both platform
+rules and the detector's documented `pause`/`start` contract, and asserts that a full turn
+performs no `getUserMedia`, that the answer is actually played, and that an interrupted capture
+asks for a tap instead of dying. It fails on the behaviour the iPhone was showing and passes on
+the current code. It needs a Chrome-family browser: `VOX_BROWSER=/path/to/chrome python3
+-m unittest discover -s tests`. Not yet confirmed on a physical iPhone; the scenario is
+reconstruction from the two rules above, not measurement.
+
 ## Ports and bindings
 
 | Component | Default binding | Role |
