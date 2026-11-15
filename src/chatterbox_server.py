@@ -54,6 +54,10 @@ PEAK_GUARD_TARGET = 0.891  # ~-1 dBFS
 # derived artefacts, not the user's clips, so they are not on the PVC and never in the
 # allow-list - the path a request supplies is checked before anything is written here.
 DEFAULT_REF_SCRATCH = "/tmp/edvox-chatterbox-refs"
+# Seconds of silence prepended to every reference before conditioning. Must be at least as
+# long as the language model's prefix window (measured 375 tokens, ~7.5 s on the turbo
+# checkpoint) or the pad achieves nothing; see State.conditioning_source.
+DEFAULT_REF_LEAD_SILENCE = 8.0
 
 
 def parse_allow_roots(value: str | None) -> list[Path]:
@@ -72,6 +76,8 @@ class State:
                  default_repetition_penalty: float = 1.2,
                  default_reference: str = "",
                  lead_silence: float = 0.0,
+                 widen_decoder_window: bool = False,
+                 widened_window_max_seconds: float = 30.0,
                  scratch_dir: str = DEFAULT_REF_SCRATCH) -> None:
         self.model = model
         self.model_name = model_name
@@ -81,6 +87,8 @@ class State:
         self.default_repetition_penalty = default_repetition_penalty
         self.default_reference = default_reference
         self.lead_silence = max(lead_silence, 0.0)
+        self.widen_decoder_window = bool(widen_decoder_window)
+        self.widened_window_max_seconds = max(widened_window_max_seconds, 1.0)
         self.scratch_dir = Path(scratch_dir)
         self.padded_cache: dict[tuple[str, int, int, float], Path] = {}
         self.allow_roots = allow_roots
@@ -154,18 +162,25 @@ class State:
 
         # One expensive pass per (clip, dial): audio decode, resample, speaker embedding,
         # conditioning tokens, and the emotion_adv scalar that carries exaggeration.
-        if self.lead_silence > 0:
-            # DEC_COND_LEN is the voice decoder's window into the reference, in samples of the
-            # 24 kHz audio, and the library default is 240000 = 10 s. Prepending silence pushes
-            # the *speech* out of that window (8 s of silence leaves only the first 2 s of a
-            # 10.3 s clip), so widen it to whatever the padded file actually is. The speaker
-            # embedding already sees the whole clip; this puts the decoder on the same footing.
+        if self.lead_silence > 0 and self.widen_decoder_window:
+            # DEC_COND_LEN is the *voice decoder's* window into the reference, in samples of
+            # the 24 kHz audio (library default 240000 = 10 s). Left alone, 8 s of padding means
+            # that window is 8 s of silence plus the first 2 s of speech, which costs speaker
+            # similarity: voice-encoder cosine to the raw clip measured 0.748 un-widened against
+            # 0.789 widened. Widening is worse on the axis this fix exists for, though - over
+            # the same 12 lines: un-widened 12/12 faithful and 0 leaks, widened 11/12 with 1
+            # garbled - and it holds ~420 MiB more on a card three camry object detectors are
+            # already using (3750 against 3328 MiB). So the default is not to widen, and the
+            # knob exists because the timbre difference is audible enough to be worth a dial.
+            # Bounded regardless: a recording enrolled through the browser can be any length,
+            # and an unbounded window on a time-sliced shared GPU is how the pod dies.
             import torchaudio
 
-            info = torchaudio.info(str(source))
-            frames = info.num_frames
-            if frames > self.model.DEC_COND_LEN:
-                self.model.DEC_COND_LEN = frames
+            frames = torchaudio.info(str(source)).num_frames
+            ceiling = int(self.model.sr * self.widened_window_max_seconds)
+            target = min(frames, ceiling)
+            if target > self.model.DEC_COND_LEN:
+                self.model.DEC_COND_LEN = target
         self.model.prepare_conditionals(str(source), exaggeration=exaggeration)
         conditionals = self.model.conds
         if conditionals is None:
@@ -213,6 +228,7 @@ class Handler(BaseHTTPRequestHandler):
                     # Non-zero means references are being silence-padded before conditioning;
                     # see State.conditioning_source for why this is not cosmetic.
                     "ref_lead_silence": state.lead_silence,
+                    "ref_decoder_window_widened": state.widen_decoder_window,
                     "cached_references": len(state.reference_cache),
                     "active_reference": active[0] if active else None,
                     "active_exaggeration": active[3] if active else None,
@@ -339,11 +355,19 @@ def main() -> int:
     parser.add_argument("--repetition-penalty", type=float,
                         default=float(os.environ.get("CHATTERBOX_REPETITION_PENALTY", "1.2")))
     parser.add_argument("--ref-lead-silence", type=float,
-                        default=float(os.environ.get("CHATTERBOX_REF_LEAD_SILENCE", "8")),
+                        default=float(os.environ.get("CHATTERBOX_REF_LEAD_SILENCE",
+                                                     str(DEFAULT_REF_LEAD_SILENCE))),
                         help="Seconds of silence prepended to every reference before it is "
                              "conditioned on. Keeps words out of the T3 prefix window, which "
                              "is what stops Chatterbox speaking the reference clip's own "
                              "transcript. 0 disables (expect reference-content leaks).")
+    parser.add_argument("--widen-decoder-window", action="store_true",
+                        default=os.environ.get("CHATTERBOX_REF_WIDEN_DECODER_WINDOW", "")
+                        .strip().lower() in ("1", "true", "yes", "on"),
+                        help="Let the voice decoder see the whole padded reference instead of "
+                             "its default 10 s window. Raises speaker similarity (VE cosine "
+                             "0.789 against 0.748) at the cost of fidelity to the requested "
+                             "text (11/12 against 12/12 faithful) and ~420 MiB of VRAM.")
     parser.add_argument("--default-reference", default=os.environ.get(
         "CHATTERBOX_DEFAULT_REFERENCE", "/app/edvox/voices/clone/aussie-conv-ref.wav"),
         help="voice used when a session has not uploaded its own reference; the natural "
@@ -402,7 +426,8 @@ def main() -> int:
                   default_temperature=min(max(args.temperature, 0.1), 1.5),
                   default_repetition_penalty=max(args.repetition_penalty, 1.0),
                   default_reference=args.default_reference.strip(),
-                  lead_silence=max(args.ref_lead_silence, 0.0))
+                  lead_silence=max(args.ref_lead_silence, 0.0),
+                  widen_decoder_window=args.widen_decoder_window)
     warm_target = args.warmup_reference.strip() or state.default_reference
     if state.default_reference:
         default_path = Path(state.default_reference).expanduser()
