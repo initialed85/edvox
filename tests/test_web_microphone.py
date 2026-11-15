@@ -134,7 +134,7 @@ class MicrophoneLifecycleTest(unittest.TestCase):
             shutil.rmtree(work, ignore_errors=True)
         lines = [line for line in output.splitlines() if line.startswith(("PASS", "FAIL"))]
         failed = [line for line in lines if line.startswith("FAIL")]
-        self.assertGreaterEqual(len(lines), 12, f"harness stopped early: {output}")
+        self.assertGreaterEqual(len(lines), 16, f"harness stopped early: {output}")
         self.assertEqual(failed, [], "\n".join(lines))
         self.assertNotIn("page errors", output, output)
         self.assertIn("prompts the user would have seen: 2", output, output)

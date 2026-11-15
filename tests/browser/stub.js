@@ -66,7 +66,9 @@ class FakeAudio {
   load() {}
   async play() {
     plays.push(this._src);
-    if (!this.armed && !window.__inGesture) throw new DOMException('playback requires a gesture', 'NotAllowedError');
+    // __forceRefuse models iOS deciding the gesture has expired, independently of the arming
+    // rule, so the "playback was refused" branch of the app can be exercised.
+    if (window.__forceRefuse || (!this.armed && !window.__inGesture)) throw new DOMException('playback requires a gesture', 'NotAllowedError');
     this.armed = true;
     this.paused = false;
     this.ended = true; this.paused = true;
@@ -134,3 +136,5 @@ window.__tap = async () => {
 };
 window.__check = check;
 window.__setKill = (v) => { window.__killDuringTurn = v; };
+window.__setRefuse = (v) => { window.__forceRefuse = v; };
+window.__touch = () => document.dispatchEvent(new MouseEvent('pointerdown', {bubbles: true}));

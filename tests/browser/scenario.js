@@ -4,6 +4,7 @@
 (async () => {
   const wait = window.__wait, tap = window.__tap, status = window.__status, check = window.__check;
   const counters = window.__counters, stream = window.__stream, setKill = window.__setKill;
+  const setRefuse = window.__setRefuse, touch = window.__touch;
   const track = () => {
     check('microphone stream exists', Boolean(stream()), JSON.stringify(counters()));
     return stream();
@@ -64,11 +65,27 @@
     check('and the next turn works normally',
       counters().gumCalls === c.gumCalls && status() === 'Listening…',
       `gum=${counters().gumCalls} status=${status()}`);
+
+    // Turn 3: playback itself is refused (the gesture expired). The old code swallowed that and
+    // the answer was never heard, which is what "it fails as it goes to answer" looked like.
+    c = counters();
+    setRefuse(true);
+    window.__vad.speak();
+    await wait(200);
+    check('a refused answer says so instead of going silent', /Tap to hear the answer/.test(status()), status());
+    setRefuse(false);
+    touch();
+    await wait(200);
+    check('the next touch plays the refused answer',
+      counters().plays.slice(c.plays.length).some((p) => p.includes('/audio/answer')),
+      JSON.stringify(counters().plays.slice(c.plays.length)));
+    await wait(150);
+    check('and listening resumes once it has played', status() === 'Listening…', status());
     window.out(`prompts the user would have seen: ${counters().gumPrompts}`);
   } catch (e) {
     window.out('RUNNER ERROR ' + e.message + ' ' + (e.stack || ''));
     window.results.push({ok: false, line: 'FAIL runner error'});
   }
   if (window.__errs.length) window.out('page errors: ' + window.__errs.join(' | '));
-  document.title = window.results.length >= 12 && window.results.every((r) => r.ok) ? 'ALL-PASS' : 'SOME-FAIL';
+  document.title = window.results.length >= 15 && window.results.every((r) => r.ok) ? 'ALL-PASS' : 'SOME-FAIL';
 })();

@@ -364,16 +364,23 @@ async function waitForPlayback(audio) {
     } catch (_) {
       // Playback was refused - iOS with an expired gesture, most often. The old code returned
       // here, which is how a turn could "fail as it goes to answer" with no message and no
-      // speech: the sentence was decoded and simply never played. Queue it for the next touch.
+      // speech: the sentence was decoded and simply never played. Say so, and queue it for the
+      // next touch, rather than sitting in "Speaking…" while nothing comes out.
+      setPhase('needs-tap', 'Tap to hear the answer');
+      // Bounded deliberately: the microphone stays muted while waiting, so an unattended wait
+      // would be dead listening.
       await new Promise((resolve) => {
         const timer = setTimeout(() => {
           document.removeEventListener('pointerdown', unlock);
           resolve();
-        }, 20000);
+        }, 8000);
         const unlock = () => {
           clearTimeout(timer);
           document.removeEventListener('pointerdown', unlock);
-          audio.play().then(() => audio.addEventListener('ended', resolve, {once: true})).catch(resolve);
+          audio.play().then(() => {
+            setPhase('speaking', 'Speaking…');
+            audio.addEventListener('ended', resolve, {once: true});
+          }).catch(resolve);
         };
         document.addEventListener('pointerdown', unlock, {once: true});
       });
