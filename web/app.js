@@ -563,8 +563,9 @@ function disableVox() {
 }
 
 orb.addEventListener('click', () => {
-  // Conversation mode stays locked to VOX. The light is only a permission
-  // retry affordance once startup failed; it is not an on/off control.
+  // Conversation mode stays locked to VOX. The light starts the conversation on a first
+  // visit (a phone will not hand over a microphone outside a gesture) and retries it after an
+  // interruption; it is not an on/off control.
   if (!state.voxEnabled) {
     // The tap is the gesture iOS requires for both the microphone and playback, so everything
     // that needs it happens inside this handler, synchronously where possible.
@@ -613,7 +614,21 @@ async function boot() {
     state.autonomousIntervalSeconds = Number(session.autonomous_interval_seconds || state.autonomousAfterSeconds || 10);
     await request('/api/health');
     await requestWakeLock();
-    await enableVox();
+    // A gesture-less getUserMedia is the first thing a phone punishes: Safari refuses it
+    // outright, and Chrome on iOS puts the browser into a half-started call state - the capture
+    // is pending with the permission prompt floating, and the first playback then demands a
+    // second tap-to-allow bar. Both prompts can only be answered from inside a gesture, so when
+    // permission is not already granted we hand startup to the orb tap, which runs
+    // unlockPlayback() and enableVox() inside the gesture and asks exactly once.
+    let microphone = 'unknown';
+    try {
+      microphone = (await navigator.permissions.query({name: 'microphone'})).state;
+    } catch (_) { /* query unsupported: keep the legacy auto-start path */ }
+    if (microphone === 'granted') {
+      await enableVox();
+    } else {
+      markNeedsTap('Tap the light to start listening');
+    }
   } catch (error) {
     showError(error);
   }
